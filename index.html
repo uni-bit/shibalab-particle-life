@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>破壊と創造 — Particle Life</title>
+<style>
+  html, body {
+    margin: 0; height: 100%; overflow: hidden; background: #000; color: #ddd;
+    font-family: system-ui, "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
+  }
+  #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; }
+
+  /* --- 小さく控えめな操作パネル --- */
+  #panel {
+    position: fixed; top: 12px; left: 12px; width: 236px; padding: 10px 12px;
+    background: rgba(10, 10, 14, 0.62); border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px; font-size: 12px; line-height: 1.4; user-select: none;
+    backdrop-filter: blur(4px);
+  }
+  #panel.hidden { display: none; }
+  #panel h1 { font-size: 13px; font-weight: 600; margin: 0 0 6px; letter-spacing: 0.08em; }
+  #panel .row { margin: 6px 0; }
+  #panel label { display: flex; justify-content: space-between; opacity: 0.85; }
+  #panel input[type=range] { width: 100%; margin: 2px 0 0; accent-color: #9ad; }
+  #panel .buttons { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  #panel button {
+    flex: 1 1 auto; background: rgba(255,255,255,0.07); color: #eee; font: inherit;
+    border: 1px solid rgba(255,255,255,0.15); border-radius: 5px; padding: 4px 6px; cursor: pointer;
+  }
+  #panel button:hover { background: rgba(255,255,255,0.15); }
+  #stats { display: flex; justify-content: space-between; opacity: 0.75; margin-top: 8px; }
+  #notice { color: #fc8; min-height: 1.4em; margin-top: 4px; font-size: 11px; }
+  #help { opacity: 0.5; font-size: 11px; margin-top: 6px; }
+
+  /* 6×6 引力行列の可視化 (行=作用を受ける側, 列=相手) */
+  #matrix { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; margin-top: 8px; }
+  #matrix div { aspect-ratio: 1 / 1; border-radius: 2px; }
+  #matrix .head { transform: scale(0.55); border-radius: 50%; }
+
+  /* 「破壊」中のポインタ位置を示すリング */
+  #ring {
+    position: fixed; pointer-events: none; border: 1px solid rgba(255,140,120,0.45);
+    border-radius: 50%; display: none; transform: translate(-50%, -50%);
+  }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="ring"></div>
+
+<div id="panel">
+  <h1>破壊と創造 <span style="opacity:.5;font-weight:400">Particle Life</span></h1>
+  <div class="row">
+    <label><span>粒子数</span><span id="countVal"></span></label>
+    <input id="count" type="range">
+  </div>
+  <div class="row">
+    <label><span>相互作用半径 rMax</span><span id="rmaxVal"></span></label>
+    <input id="rmax" type="range">
+  </div>
+  <div class="row">
+    <label><span>摩擦 (速度の半減期)</span><span id="frictionVal"></span></label>
+    <input id="friction" type="range">
+  </div>
+  <div class="buttons">
+    <button id="btnCreate" title="R キー">創造 (R)</button>
+    <button id="btnPause" title="Space キー">一時停止</button>
+    <button id="btnFull" title="F キー">全画面 (F)</button>
+  </div>
+  <div id="matrix"></div>
+  <div id="stats"><span id="fps">FPS --</span><span id="renderer"></span></div>
+  <div id="notice"></div>
+  <div id="help">押し続けて「破壊」/ R 創造 / Space 停止 / F 全画面 / H パネル表示切替</div>
+</div>
+
+<script>
+'use strict';
+
+/* =====================================================================
+ *  定数 (Constants) — 調整したい値はすべてここに集約
+ * ===================================================================== */
+const NUM_TYPES          = 6;       // 粒子の色の種類数
+const DEFAULT_COUNT      = 3000;    // 初期粒子数
+const MIN_COUNT          = 500;     // スライダー最小
+const MAX_COUNT          = 8000;    // スライダー最大 (= 配列確保サイズ)
+
+const DEFAULT_RMAX       = 60;      // 相互作用半径 [CSS px]
+const MIN_RMAX           = 30;
+const MAX_RMAX           = 160;
+const BETA               = 0.3;     // この正規化距離未満は常に反発
+const FORCE_FACTOR       = 10;      // 力の強さ (加速度 = f * rMax * FORCE_FACTOR)
+
+const DEFAULT_HALF_LIFE  = 0.04;    // 速度が半分になるまでの時間 [s]
+const MIN_HALF_LIFE      = 0.01;
+const MAX_HALF_LIFE      = 0.20;
+const DT                 = 1 / 60;  // 固定シミュレーション時間刻み [s]
+
+const MATRIX_LERP_TIME   = 1.5;     // 「創造」時に行列を補間する時間 [s]
+
+const POINTER_RADIUS     = 140;     // 「破壊」の影響半径 [CSS px]
+const POINTER_FORCE      = 4000;    // 「破壊」の押し出し加速度 [px/s^2]
+
+const MAX_DPR            = 1.5;     // devicePixelRatio の上限 (性能のため)
+const POINT_SIZE         = 6;       // 描画する点の大きさ [CSS px] (グロー込み)
+const POINT_ALPHA        = 0.55;    // 加算合成時の明るさ
+const TRAIL_FADE         = 0.22;    // 残像: 毎フレーム画面を暗くする割合 (1 = 残像なし)
+const TRAIL_FLOOR        = 2 / 255; // 残像が8bit丸めで残り続けないよう毎フレーム引く値
+
+const FPS_LOW_THRESHOLD  = 40;      // この FPS を下回り続けたら粒子数を自動削減
+const FPS_LOW_DURATION   = 2.0;     // 何秒続いたら削減するか
+const AUTO_REDUCE_FACTOR = 0.8;     // 削減時に掛ける係数
+const FPS_WARMUP         = 2.0;     // 起動直後は計測しない [s]
+
+// 各タイプの色 (RGB 0..1)。色相を等間隔に配置
+const TYPE_COLORS = new Float32Array(NUM_TYPES * 3);
+for (let t = 0; t < NUM_TYPES; t++) {
+  const [r, g, b] = hslToRgb(t / NUM_TYPES, 0.9, 0.6);
+  TYPE_COLORS[t * 3] = r; TYPE_COLORS[t * 3 + 1] = g; TYPE_COLORS[t * 3 + 2] = b;
+}
+
+/* =====================================================================
+ *  シミュレーション状態 (すべて起動時に確保した型付き配列 — 毎フレームの確保なし)
+ * ===================================================================== */
+const posX = new Float32Array(MAX_COUNT);
+const posY = new Float32Array(MAX_COUNT);
+const velX = new Float32Array(MAX_COUNT);
+const velY = new Float32Array(MAX_COUNT);
+const type = new Uint8Array(MAX_COUNT);
+const cellOf = new Int32Array(MAX_COUNT);     // 各粒子が属するグリッドセル
+const sortedIdx = new Int32Array(MAX_COUNT);  // セル順に並べた粒子インデックス
+// セル順に詰め直した位置・タイプのコピー。近傍探索でメモリを連続して読めるので速い
+const sortX = new Float32Array(MAX_COUNT);
+const sortY = new Float32Array(MAX_COUNT);
+const sortT = new Uint8Array(MAX_COUNT);
+const forceX = new Float32Array(MAX_COUNT);   // 力の合計 (セル順)
+const forceY = new Float32Array(MAX_COUNT);
+// 各ペアを1回だけ調べるための「前方」の隣接セル (添字 0 は同じセル)
+const NEIGHBOR_DX = [0, 1, -1, 0, 1];
+const NEIGHBOR_DY = [0, 0,  1, 1, 1];
+
+// 引力行列: matrix[i*NUM_TYPES + j] = タイプ i がタイプ j から受ける引力 (-1..1)
+const matrix     = new Float32Array(NUM_TYPES * NUM_TYPES); // 現在使用中の値
+const matrixFrom = new Float32Array(NUM_TYPES * NUM_TYPES); // 補間の始点
+const matrixTo   = new Float32Array(NUM_TYPES * NUM_TYPES); // 補間の終点
+let matrixLerpT = 1;  // 0..1 (1 = 補間完了)
+
+const params = {
+  count: DEFAULT_COUNT,
+  rMaxSetting: DEFAULT_RMAX, // スライダーで指定した値
+  rMax: DEFAULT_RMAX,        // 実際に使う値 (極端に小さいウィンドウでは制限される)
+  halfLife: DEFAULT_HALF_LIFE,
+  paused: false,
+};
+
+// 世界 (トーラス) のサイズ = ウィンドウの CSS ピクセルサイズ
+let worldW = 1, worldH = 1;
+
+// 一様グリッド (セルサイズ >= rMax)。サイズ変更時のみ再確保
+let gridCols = 1, gridRows = 1, cellW = 1, cellH = 1;
+let cellCount = new Int32Array(1);
+let cellStart = new Int32Array(2);
+
+/* ---------------------------------------------------------------------
+ *  入力 — 「破壊」の位置。
+ *  将来 Web カメラの手検出に置き換える場合は、この3項目を書き換えるだけでよい。
+ *  (例: 手のひらの座標を x,y に、手が開いている間 active = true)
+ *  座標は CSS ピクセル (世界座標と同じ)。
+ * --------------------------------------------------------------------- */
+const input = { active: false, x: 0, y: 0 };
+
+/* =====================================================================
+ *  初期化ヘルパー
+ * ===================================================================== */
+function randomizeParticle(i) {
+  posX[i] = Math.random() * worldW;
+  posY[i] = Math.random() * worldH;
+  velX[i] = 0; velY[i] = 0;
+  type[i] = (Math.random() * NUM_TYPES) | 0;
+}
+
+function randomMatrixInto(target) {
+  for (let k = 0; k < target.length; k++) target[k] = Math.random() * 2 - 1;
+}
+
+/** 「創造」: 新しいランダム行列へ MATRIX_LERP_TIME 秒かけて滑らかに移行する */
+function startCreation() {
+  matrixFrom.set(matrix);       // 補間途中でも「今の値」から始める
+  randomMatrixInto(matrixTo);
+  matrixLerpT = 0;
+}
+
+function updateMatrixLerp(dtReal) {
+  if (matrixLerpT >= 1) return false;
+  matrixLerpT = Math.min(1, matrixLerpT + dtReal / MATRIX_LERP_TIME);
+  const s = matrixLerpT * matrixLerpT * (3 - 2 * matrixLerpT); // smoothstep
+  for (let k = 0; k < matrix.length; k++) {
+    matrix[k] = matrixFrom[k] + (matrixTo[k] - matrixFrom[k]) * s;
+  }
+  return true;
+}
+
+function setParticleCount(n) {
+  n = Math.max(MIN_COUNT, Math.min(MAX_COUNT, n | 0));
+  for (let i = params.count; i < n; i++) randomizeParticle(i); // 増えた分だけ生成
+  params.count = n;
+  renderer.onCountChanged(n);
+}
+
+/** グリッドの寸法を決める。セル幅は rMax 以上なので 3×3 セルの探索で十分 */
+function rebuildGrid() {
+  // rMax が世界の半分を超えると最短像 (minimum image) が一意でなくなるので制限
+  // さらに 1/3 以下にして、グリッドが必ず 3×3 以上になるようにする (step の前提)
+  const rMax = Math.min(params.rMaxSetting, worldW / 3, worldH / 3);
+  params.rMax = rMax;   // 実際に使う値 (スライダー値 rMaxSetting は保持)
+  gridCols = Math.max(1, Math.floor(worldW / rMax));
+  gridRows = Math.max(1, Math.floor(worldH / rMax));
+  cellW = worldW / gridCols;   // >= rMax
+  cellH = worldH / gridRows;   // >= rMax
+  const nCells = gridCols * gridRows;
+  if (cellCount.length !== nCells) {
+    cellCount = new Int32Array(nCells);
+    cellStart = new Int32Array(nCells + 1);
+  }
+}
+
+function resize() {
+  const oldW = worldW, oldH = worldH;
+  worldW = Math.max(1, window.innerWidth);
+  worldH = Math.max(1, window.innerHeight);
+  // 既存粒子は相対位置を保って新しい世界に拡大縮小
+  const sx = worldW / oldW, sy = worldH / oldH;
+  for (let i = 0; i < params.count; i++) {
+    posX[i] = Math.min(posX[i] * sx, worldW - 1e-3);
+    posY[i] = Math.min(posY[i] * sy, worldH - 1e-3);
+  }
+  rebuildGrid();
+  renderer.resize(worldW, worldH, Math.min(window.devicePixelRatio || 1, MAX_DPR));
+}
+
+/* =====================================================================
+ *  シミュレーション本体
+ * ===================================================================== */
+
+/** Particle Life の標準的な力関数。r = d / rMax (0..1), a = 引力係数 */
+function force(r, a) {
+  if (r < BETA) return r / BETA - 1;                                  // 近すぎる → 反発
+  if (r < 1)    return a * (1 - Math.abs(2 * r - 1 - BETA) / (1 - BETA)); // 三角形の引力/斥力
+  return 0;
+}
+
+/** 粒子をセルごとに並べる (計数ソート, O(n)) */
+function binParticles(n) {
+  cellCount.fill(0);
+  for (let i = 0; i < n; i++) {
+    // 浮動小数の端 (x == worldW) 対策で最大値にクランプ
+    let cx = (posX[i] / cellW) | 0; if (cx >= gridCols) cx = gridCols - 1;
+    let cy = (posY[i] / cellH) | 0; if (cy >= gridRows) cy = gridRows - 1;
+    const c = cy * gridCols + cx;
+    cellOf[i] = c;
+    cellCount[c]++;
+  }
+  // 累積和で各セルの開始位置を求める
+  let acc = 0;
+  for (let c = 0; c < cellCount.length; c++) { cellStart[c] = acc; acc += cellCount[c]; }
+  cellStart[cellCount.length] = acc;
+  // cellCount を書き込みカーソルとして再利用
+  for (let c = 0; c < cellCount.length; c++) cellCount[c] = cellStart[c];
+  for (let i = 0; i < n; i++) {
+    const k = cellCount[cellOf[i]]++;
+    sortedIdx[k] = i;
+    sortX[k] = posX[i]; sortY[k] = posY[i]; sortT[k] = type[i];
+  }
+}
+
+function step(dt) {
+  const n = params.count;
+  const rMax = params.rMax;
+  const rMax2 = rMax * rMax;
+  const invRMax = 1 / rMax;
+  const halfW = worldW * 0.5, halfH = worldH * 0.5;
+  const friction = Math.pow(0.5, dt / params.halfLife); // 半減期型の減衰係数
+  const accScale = rMax * FORCE_FACTOR * dt;
+  const INV_BETA = 1 / BETA, INV_ONE_MINUS_BETA = 1 / (1 - BETA);
+
+  binParticles(n);
+
+  // ---- 1) 力の計算 ----
+  // 各ペアを1回だけ調べ、距離計算 (sqrt など) を両方の粒子で共有する。
+  // 引力係数は非対称 (A→B と B→A が違う) なので、力そのものは別々に求める。
+  // 「同じセル内」と「右・左下・下・右下の4セル」だけ見れば全ペアを1回ずつ網羅できる。
+  // (グリッドは必ず 3×3 以上 → rebuildGrid 参照)
+  forceX.fill(0, 0, n);
+  forceY.fill(0, 0, n);
+  for (let cy = 0; cy < gridRows; cy++) {
+    for (let cx = 0; cx < gridCols; cx++) {
+      const c = cy * gridCols + cx;
+      const s0 = cellStart[c], e0 = cellStart[c + 1];
+      if (s0 === e0) continue;
+
+      // m = 0: 同じセル内。m = 1..4: 隣の4セル
+      for (let m = 0; m < 5; m++) {
+        let q0, q1, offX = 0, offY = 0;
+        if (m === 0) { q0 = s0; q1 = e0; }
+        else {
+          let nx = cx + NEIGHBOR_DX[m], ny = cy + NEIGHBOR_DY[m];
+          // 端はトーラスとして反対側のセルへ回り込み、その分だけ座標をずらす
+          if (nx < 0) { nx += gridCols; offX = -worldW; } else if (nx >= gridCols) { nx -= gridCols; offX = worldW; }
+          if (ny >= gridRows) { ny -= gridRows; offY = worldH; }
+          const q = ny * gridCols + nx;
+          q0 = cellStart[q]; q1 = cellStart[q + 1];
+          if (q0 === q1) continue;
+        }
+        for (let a = s0; a < e0; a++) {
+          const xa = sortX[a] - offX, ya = sortY[a] - offY;
+          const rowA = sortT[a] * NUM_TYPES, ta = sortT[a];
+          let fxa = 0, fya = 0;
+          for (let b = (m === 0 ? a + 1 : q0); b < q1; b++) {
+            const dx = sortX[b] - xa;
+            const dy = sortY[b] - ya;
+            const d2 = dx * dx + dy * dy;
+            if (d2 >= rMax2 || d2 === 0) continue;
+            const d = Math.sqrt(d2);
+            const r = d * invRMax;
+            const invD = 1 / d;
+            if (r < BETA) {
+              // 近すぎる → タイプに関係なく反発 (対称)
+              const sc = (r * INV_BETA - 1) * invD;
+              const px = dx * sc, py = dy * sc;
+              fxa += px; fya += py;
+              forceX[b] -= px; forceY[b] -= py;
+            } else {
+              // 三角形の引力/斥力。係数だけ a→b と b→a で違う
+              const tri = (1 - Math.abs(2 * r - 1 - BETA) * INV_ONE_MINUS_BETA) * invD;
+              const tb = sortT[b];
+              const sa = matrix[rowA + tb] * tri;
+              const sb = matrix[tb * NUM_TYPES + ta] * tri;
+              fxa += dx * sa; fya += dy * sa;
+              forceX[b] -= dx * sb; forceY[b] -= dy * sb;
+            }
+          }
+          forceX[a] += fxa; forceY[a] += fya;
+        }
+      }
+    }
+  }
+
+  // ---- 力 → 速度 (k はセル順の番号、i は元の粒子番号) ----
+  for (let k = 0; k < n; k++) {
+    const i = sortedIdx[k];
+    let vx = velX[i] * friction + forceX[k] * accScale;
+    let vy = velY[i] * friction + forceY[k] * accScale;
+
+    // 「破壊」: 入力位置から放射状に押し出す (トーラス上の最短距離で判定)
+    if (input.active) {
+      let dx = sortX[k] - input.x;
+      if (dx > halfW) dx -= worldW; else if (dx < -halfW) dx += worldW;
+      let dy = sortY[k] - input.y;
+      if (dy > halfH) dy -= worldH; else if (dy < -halfH) dy += worldH;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < POINTER_RADIUS * POINTER_RADIUS && d2 > 1e-6) {
+        const d = Math.sqrt(d2);
+        const sc = (1 - d / POINTER_RADIUS) * POINTER_FORCE * dt / d;
+        vx += dx * sc; vy += dy * sc;
+      }
+    }
+    velX[i] = vx; velY[i] = vy;
+  }
+
+  // ---- 2) 速度 → 位置 (トーラスで回り込み) ----
+  for (let i = 0; i < n; i++) {
+    let x = posX[i] + velX[i] * dt;
+    let y = posY[i] + velY[i] * dt;
+    // 1ステップの移動量は世界サイズより十分小さい前提。念のため while で確実に範囲内へ
+    while (x < 0) x += worldW; while (x >= worldW) x -= worldW;
+    while (y < 0) y += worldH; while (y >= worldH) y -= worldH;
+    posX[i] = x; posY[i] = y;
+  }
+}
+
+/* =====================================================================
+ *  描画: WebGL (加算合成 + ソフトグロー + 残像)。使えなければ Canvas2D
+ *  どちらも { name, resize(w,h,dpr), onCountChanged(n), draw(n) } を持つ
+ * ===================================================================== */
+const canvas = document.getElementById('view');
+
+function createWebGLRenderer() {
+  const gl = canvas.getContext('webgl', {
+    alpha: false, antialias: false, depth: false, stencil: false,
+    preserveDrawingBuffer: true,   // 残像のため前フレームを保持
+    powerPreference: 'high-performance',
+  });
+  if (!gl) return null;
+
+  function compile(kind, src) {
+    const s = gl.createShader(kind);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  }
+  function program(vs, fs, attribs) {
+    const p = gl.createProgram();
+    gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+    gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+    attribs.forEach((name, loc) => gl.bindAttribLocation(p, loc, name));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+    return p;
+  }
+
+  // 粒子: 位置 (CSS px) とタイプを受け取り、点スプライトとして描く
+  const pointProg = program(`
+    attribute vec2 aPos;
+    attribute float aType;
+    uniform vec2 uWorld;
+    uniform float uSize;
+    uniform vec3 uColors[${NUM_TYPES}];
+    varying vec3 vColor;
+    void main() {
+      vec2 clip = aPos / uWorld * 2.0 - 1.0;
+      gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+      gl_PointSize = uSize;
+      vColor = uColors[int(aType + 0.5)];
+    }`, `
+    precision mediump float;
+    varying vec3 vColor;
+    uniform float uAlpha;
+    void main() {
+      vec2 p = gl_PointCoord * 2.0 - 1.0;
+      float d2 = dot(p, p);
+      if (d2 > 1.0) discard;
+      // 明るい芯 + 柔らかい外周 = 安価なグロー
+      float glow = exp(-d2 * 5.0) + (1.0 - d2) * 0.15;
+      gl_FragColor = vec4(vColor * glow * uAlpha, 1.0);
+    }`, ['aPos', 'aType']);
+
+  // 全画面四角形: 残像のフェード用
+  const fadeProg = program(`
+    attribute vec2 aPos;
+    void main() { gl_Position = vec4(aPos, 0.0, 1.0); }`, `
+    precision mediump float;
+    uniform vec4 uColor;
+    void main() { gl_FragColor = uColor; }`, ['aPos']);
+
+  const uWorld  = gl.getUniformLocation(pointProg, 'uWorld');
+  const uSize   = gl.getUniformLocation(pointProg, 'uSize');
+  const uColors = gl.getUniformLocation(pointProg, 'uColors');
+  const uAlpha  = gl.getUniformLocation(pointProg, 'uAlpha');
+  const uFadeColor = gl.getUniformLocation(fadeProg, 'uColor');
+
+  gl.useProgram(pointProg);
+  gl.uniform3fv(uColors, TYPE_COLORS);
+  gl.uniform1f(uAlpha, POINT_ALPHA);
+
+  const quadBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+
+  // 頂点データ: [x, y, type] × MAX_COUNT。GPU 側バッファも最大サイズで確保
+  const vertData = new Float32Array(MAX_COUNT * 3);
+  let vertView = vertData.subarray(0, DEFAULT_COUNT * 3); // 粒子数変更時のみ作り直す
+  const pointBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, pointBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, vertData.byteLength, gl.DYNAMIC_DRAW);
+
+  const sizeRange = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE);
+  gl.disable(gl.DEPTH_TEST);
+  gl.enable(gl.BLEND);
+  gl.clearColor(0, 0, 0, 1);
+
+  let dpr = 1;
+
+  return {
+    name: 'WebGL',
+    resize(w, h, newDpr) {
+      dpr = newDpr;
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.useProgram(pointProg);
+      gl.uniform2f(uWorld, w, h);
+      gl.uniform1f(uSize, Math.min(POINT_SIZE * dpr, sizeRange[1]));
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    },
+    onCountChanged(n) { vertView = vertData.subarray(0, n * 3); },
+    draw(n) {
+      // --- 残像: 前フレームを暗くする (乗算) → 少しだけ引く (8bit の残りカス対策) ---
+      gl.useProgram(fadeProg);
+      gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      gl.disableVertexAttribArray(1);
+      gl.blendEquation(gl.FUNC_ADD);
+      gl.blendFunc(gl.ZERO, gl.ONE_MINUS_SRC_ALPHA);      // dst *= (1 - fade)
+      gl.uniform4f(uFadeColor, 0, 0, 0, TRAIL_FADE);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.blendEquation(gl.FUNC_REVERSE_SUBTRACT);          // dst -= floor
+      gl.blendFunc(gl.ONE, gl.ONE);
+      gl.uniform4f(uFadeColor, TRAIL_FLOOR, TRAIL_FLOOR, TRAIL_FLOOR, 0);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      // --- 粒子: 加算合成 ---
+      for (let i = 0, k = 0; i < n; i++, k += 3) {
+        vertData[k] = posX[i]; vertData[k + 1] = posY[i]; vertData[k + 2] = type[i];
+      }
+      gl.useProgram(pointProg);
+      gl.bindBuffer(gl.ARRAY_BUFFER, pointBuf);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, vertView);
+      gl.enableVertexAttribArray(0);
+      gl.enableVertexAttribArray(1);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 12, 0);
+      gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 12, 8);
+      gl.blendEquation(gl.FUNC_ADD);
+      gl.blendFunc(gl.ONE, gl.ONE);
+      gl.drawArrays(gl.POINTS, 0, n);
+    },
+  };
+}
+
+function createCanvas2DRenderer() {
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const styles = [];
+  for (let t = 0; t < NUM_TYPES; t++) {
+    const r = TYPE_COLORS[t * 3] * 255 | 0, g = TYPE_COLORS[t * 3 + 1] * 255 | 0, b = TYPE_COLORS[t * 3 + 2] * 255 | 0;
+    styles.push(`rgba(${r},${g},${b},${POINT_ALPHA})`);
+  }
+  const fadeStyle = `rgba(0,0,0,${TRAIL_FADE})`;
+  const s = POINT_SIZE * 0.5, hs = s / 2;
+  let w = 1, h = 1;
+  return {
+    name: 'Canvas2D',
+    resize(newW, newH, dpr) {
+      w = newW; h = newH;
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h);
+    },
+    onCountChanged() {},
+    draw(n) {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = fadeStyle;
+      ctx.fillRect(0, 0, w, h);
+      ctx.globalCompositeOperation = 'lighter';
+      // fillStyle の切り替えを減らすためタイプごとにまとめて描く
+      for (let t = 0; t < NUM_TYPES; t++) {
+        ctx.fillStyle = styles[t];
+        for (let i = 0; i < n; i++) {
+          if (type[i] === t) ctx.fillRect(posX[i] - hs, posY[i] - hs, s, s);
+        }
+      }
+    },
+  };
+}
+
+let renderer = null;
+try { renderer = createWebGLRenderer(); } catch (e) { console.warn('WebGL 初期化失敗:', e); renderer = null; }
+if (!renderer) renderer = createCanvas2DRenderer();
+
+/* =====================================================================
+ *  UI
+ * ===================================================================== */
+const $ = (id) => document.getElementById(id);
+const ui = {
+  panel: $('panel'), count: $('count'), countVal: $('countVal'),
+  rmax: $('rmax'), rmaxVal: $('rmaxVal'), friction: $('friction'), frictionVal: $('frictionVal'),
+  fps: $('fps'), notice: $('notice'), matrix: $('matrix'), ring: $('ring'),
+  btnPause: $('btnPause'),
+};
+
+function setupSlider(el, min, max, stepSize, value) {
+  el.min = min; el.max = max; el.step = stepSize; el.value = value;
+}
+setupSlider(ui.count, MIN_COUNT, MAX_COUNT, 100, DEFAULT_COUNT);
+setupSlider(ui.rmax, MIN_RMAX, MAX_RMAX, 1, DEFAULT_RMAX);
+setupSlider(ui.friction, MIN_HALF_LIFE, MAX_HALF_LIFE, 0.005, DEFAULT_HALF_LIFE);
+
+function refreshLabels() {
+  ui.count.value = params.count;
+  ui.countVal.textContent = params.count;
+  ui.rmaxVal.textContent = Math.round(params.rMax) + ' px';
+  ui.frictionVal.textContent = params.halfLife.toFixed(3) + ' 秒';
+  ui.btnPause.textContent = params.paused ? '再開' : '一時停止';
+}
+
+ui.count.addEventListener('input', () => { setParticleCount(+ui.count.value); refreshLabels(); });
+ui.rmax.addEventListener('input', () => { params.rMaxSetting = +ui.rmax.value; rebuildGrid(); refreshLabels(); });
+ui.friction.addEventListener('input', () => { params.halfLife = +ui.friction.value; refreshLabels(); });
+
+// 行列の可視化: 先頭行・先頭列はタイプの色。正 = 緑 (引き合う), 負 = 赤 (反発)
+const matrixCells = [];
+(function buildMatrixGrid() {
+  const css = (t) => `rgb(${TYPE_COLORS[t*3]*255|0},${TYPE_COLORS[t*3+1]*255|0},${TYPE_COLORS[t*3+2]*255|0})`;
+  ui.matrix.appendChild(document.createElement('div')); // 左上の空白
+  for (let j = 0; j < NUM_TYPES; j++) {
+    const d = document.createElement('div'); d.className = 'head'; d.style.background = css(j);
+    ui.matrix.appendChild(d);
+  }
+  for (let i = 0; i < NUM_TYPES; i++) {
+    const h = document.createElement('div'); h.className = 'head'; h.style.background = css(i);
+    ui.matrix.appendChild(h);
+    for (let j = 0; j < NUM_TYPES; j++) {
+      const d = document.createElement('div');
+      ui.matrix.appendChild(d); matrixCells.push(d);
+    }
+  }
+  ui.matrix.title = '引力行列 (行 = 受ける側, 列 = 相手) 緑: 引力 / 赤: 斥力';
+})();
+
+function refreshMatrixView() {
+  for (let k = 0; k < matrixCells.length; k++) {
+    const v = matrix[k], a = Math.abs(v).toFixed(2);
+    matrixCells[k].style.background = v >= 0 ? `rgba(90,220,130,${a})` : `rgba(240,80,90,${a})`;
+  }
+}
+
+function togglePause() { params.paused = !params.paused; refreshLabels(); }
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen().catch(() => {});
+}
+function togglePanel() { ui.panel.classList.toggle('hidden'); }
+
+$('btnCreate').addEventListener('click', startCreation);
+ui.btnPause.addEventListener('click', togglePause);
+$('btnFull').addEventListener('click', toggleFullscreen);
+
+window.addEventListener('keydown', (e) => {
+  if (e.repeat) return;
+  switch (e.code) {
+    case 'Space': e.preventDefault(); togglePause(); break;   // ボタンへのフォーカスによる二重発火も防ぐ
+    case 'KeyR':  startCreation(); break;
+    case 'KeyF':  toggleFullscreen(); break;
+    case 'KeyH':  togglePanel(); break;
+  }
+});
+
+let noticeTimer = 0;
+function showNotice(text) {
+  ui.notice.textContent = text;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => { ui.notice.textContent = ''; }, 6000);
+}
+
+/* ---- ポインタ (マウス / タッチ) → input ---- */
+function updateRing() {
+  ui.ring.style.display = input.active ? 'block' : 'none';
+  ui.ring.style.width = ui.ring.style.height = POINTER_RADIUS * 2 + 'px';
+  ui.ring.style.left = input.x + 'px';
+  ui.ring.style.top = input.y + 'px';
+}
+canvas.addEventListener('pointerdown', (e) => {
+  canvas.setPointerCapture(e.pointerId);
+  input.active = true; input.x = e.clientX; input.y = e.clientY; updateRing();
+});
+canvas.addEventListener('pointermove', (e) => {
+  input.x = e.clientX; input.y = e.clientY;
+  if (input.active) updateRing();
+});
+function endPointer() { input.active = false; updateRing(); }
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
+
+window.addEventListener('resize', () => { resize(); refreshLabels(); });
+
+/* =====================================================================
+ *  メインループ + FPS 計測 + 自動負荷調整
+ * ===================================================================== */
+let lastTime = performance.now();
+let accumulator = 0;
+let elapsed = 0;
+let fpsFrames = 0, fpsTime = 0, lowFpsTime = 0;
+let simMsSum = 0, simSteps = 0;   // 計算時間の計測 (どこが重いかの切り分け用)
+
+function frame(now) {
+  let dtReal = (now - lastTime) / 1000;
+  lastTime = now;
+  if (dtReal > 0.25) dtReal = 0.25; // タブ復帰時などの巨大な dt を無視
+  elapsed += dtReal;
+
+  // 「創造」の行列補間 (一時停止中も進める)
+  if (updateMatrixLerp(dtReal)) refreshMatrixView();
+
+  // 固定 dt でシミュレーション (リフレッシュレートに依存しない速度)
+  if (!params.paused) {
+    // 1フレームに最大1ステップ。遅れを取り戻そうと複数ステップ回すと、
+    // 一度の処理落ちで「毎フレーム2ステップ → 30fps に固定」という悪循環になるため。
+    // 60Hz では毎フレーム、120Hz では2フレームに1回進む。処理落ち時は動きが遅くなるだけ。
+    accumulator += dtReal;
+    if (accumulator >= DT * 0.75) {
+      const t0 = performance.now();
+      step(DT);
+      simMsSum += performance.now() - t0; simSteps++;
+      accumulator = Math.min(Math.max(accumulator - DT, 0), DT * 0.5);
+    }
+  }
+
+  renderer.draw(params.count);
+
+  // FPS を 0.5 秒ごとに更新
+  fpsFrames++; fpsTime += dtReal;
+  if (fpsTime >= 0.5) {
+    const fps = fpsFrames / fpsTime;
+    // 「計算」= シミュレーション1ステップの平均時間。60fps には 16ms 未満が必要。
+    // 計算が軽いのに FPS が低い場合は、描画 (GPU) か画面側の制限が原因
+    ui.fps.textContent = 'FPS ' + fps.toFixed(0) +
+      (simSteps ? ' / 計算 ' + (simMsSum / simSteps).toFixed(1) + 'ms' : '');
+    simMsSum = 0; simSteps = 0;
+    // 低 FPS が続いたら粒子数を減らす
+    if (elapsed > FPS_WARMUP && !document.hidden && fps < FPS_LOW_THRESHOLD) {
+      lowFpsTime += fpsTime;
+      if (lowFpsTime >= FPS_LOW_DURATION && params.count > MIN_COUNT) {
+        const before = params.count;
+        setParticleCount(Math.round(before * AUTO_REDUCE_FACTOR / 100) * 100);
+        refreshLabels();
+        showNotice(`負荷軽減: 粒子数を ${before} → ${params.count} に自動で減らしました`);
+        lowFpsTime = 0;
+      }
+    } else {
+      lowFpsTime = 0;
+    }
+    fpsFrames = 0; fpsTime = 0;
+  }
+
+  requestAnimationFrame(frame);
+}
+
+/* =====================================================================
+ *  起動
+ * ===================================================================== */
+worldW = Math.max(1, window.innerWidth);
+worldH = Math.max(1, window.innerHeight);
+for (let i = 0; i < MAX_COUNT; i++) randomizeParticle(i);
+randomMatrixInto(matrix);
+setParticleCount(DEFAULT_COUNT);
+resize();
+refreshLabels();
+refreshMatrixView();
+$('renderer').textContent = renderer.name;
+requestAnimationFrame(frame);
+
+/* ---- ユーティリティ ---- */
+function hslToRgb(h, s, l) {
+  const f = (n) => {
+    const k = (n + h * 12) % 12;
+    return l - s * Math.min(l, 1 - l) * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+  };
+  return [f(0), f(8), f(4)];
+}
+</script>
+</body>
+</html>
