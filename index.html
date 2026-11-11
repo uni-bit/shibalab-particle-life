@@ -17,9 +17,25 @@
     background: rgba(10, 10, 14, 0.62); border: 1px solid rgba(255,255,255,0.08);
     border-radius: 8px; font-size: 12px; line-height: 1.4; user-select: none;
     backdrop-filter: blur(4px);
+    max-height: calc(100vh - 24px); overflow-y: auto; box-sizing: border-box;
   }
-  #panel.hidden { display: none; }
+  body.panel-hidden #panel { display: none; }
+  #panel .titlebar { display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; }
   #panel h1 { font-size: 13px; font-weight: 600; margin: 0 0 6px; letter-spacing: 0.08em; }
+  #panel #panelClose {
+    flex: 0 0 auto; width: 22px; height: 22px; padding: 0; line-height: 20px; font-size: 15px;
+    margin: -2px -4px 0 0; background: transparent; border-color: transparent; opacity: 0.6;
+  }
+  #panel #panelClose:hover { opacity: 1; background: rgba(255,255,255,0.12); }
+  /* パネルを隠しているときだけ出る小さな再表示ボタン */
+  #panelOpen {
+    position: fixed; top: 12px; left: 12px; width: 30px; height: 30px; padding: 0;
+    border-radius: 50%; border: 1px solid rgba(255,255,255,0.15); background: rgba(10,10,14,0.5);
+    color: #ddd; font-size: 16px; line-height: 28px; cursor: pointer; opacity: 0.7;
+    display: none; transition: opacity 0.2s;
+  }
+  #panelOpen:hover { opacity: 1; }
+  body.panel-hidden #panelOpen { display: block; }
   #panel .row { margin: 6px 0; }
   #panel label { display: flex; justify-content: space-between; opacity: 0.85; }
   #panel input[type=range] { width: 100%; margin: 2px 0 0; accent-color: #9ad; }
@@ -29,14 +45,32 @@
     border: 1px solid rgba(255,255,255,0.15); border-radius: 5px; padding: 4px 6px; cursor: pointer;
   }
   #panel button:hover { background: rgba(255,255,255,0.15); }
+  #panel .buttons.small button { flex: 1 1 30%; font-size: 11px; padding: 3px 4px; }
+  #panel .section { margin-top: 10px; display: flex; justify-content: space-between; align-items: baseline; }
+  #panel .section b { font-weight: 600; opacity: 0.9; }
+  #panel .hint { opacity: 0.5; font-size: 10.5px; }
+  #panel details { margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 6px; }
+  #panel summary { cursor: pointer; opacity: 0.9; font-weight: 600; }
   #stats { display: flex; justify-content: space-between; opacity: 0.75; margin-top: 8px; }
   #notice { color: #fc8; min-height: 1.4em; margin-top: 4px; font-size: 11px; }
   #help { opacity: 0.5; font-size: 11px; margin-top: 6px; }
 
   /* 6×6 引力行列の可視化 (行=作用を受ける側, 列=相手) */
-  #matrix { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; margin-top: 8px; }
+  #matrix { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; margin-top: 4px; }
   #matrix div { aspect-ratio: 1 / 1; border-radius: 2px; }
   #matrix .head { transform: scale(0.55); border-radius: 50%; }
+  /* 係数のセル: 上下ドラッグ (またはホイール) で調整、ダブルクリックで 0 */
+  #matrix .cell {
+    cursor: ns-resize; touch-action: none; position: relative;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9px; color: rgba(255,255,255,0.85); font-variant-numeric: tabular-nums;
+  }
+  #matrix .cell:hover, #matrix .cell.active { box-shadow: inset 0 0 0 1px rgba(255,255,255,0.7); }
+  #matrix.editing .cell:not(.active) { opacity: 0.55; }
+  #matrixInfo { min-height: 1.5em; margin-top: 5px; font-size: 11px; display: flex; align-items: center; gap: 4px; }
+  #matrixInfo .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: 0 0 auto; }
+  #matrixInfo .val { font-variant-numeric: tabular-nums; font-weight: 600; margin-left: auto; }
 
   /* 「破壊」中のポインタ位置を示すリング */
   #ring {
@@ -49,8 +83,12 @@
 <canvas id="view"></canvas>
 <div id="ring"></div>
 
+<button id="panelOpen" title="パネルを表示 (H)" aria-label="パネルを表示">⚙</button>
 <div id="panel">
-  <h1>破壊と創造 <span style="opacity:.5;font-weight:400">Particle Life</span></h1>
+  <div class="titlebar">
+    <h1>破壊と創造 <span style="opacity:.5;font-weight:400">Particle Life</span></h1>
+    <button id="panelClose" title="パネルを隠す (H)" aria-label="パネルを隠す">×</button>
+  </div>
   <div class="row">
     <label><span>粒子数</span><span id="countVal"></span></label>
     <input id="count" type="range">
@@ -63,15 +101,34 @@
     <label><span>摩擦 (速度の半減期)</span><span id="frictionVal"></span></label>
     <input id="friction" type="range">
   </div>
+  <div class="row">
+    <label><span>色の数</span><span id="typesVal"></span></label>
+    <input id="types" type="range">
+  </div>
   <div class="buttons">
     <button id="btnCreate" title="R キー">創造 (R)</button>
     <button id="btnPause" title="Space キー">一時停止</button>
     <button id="btnFull" title="F キー">全画面 (F)</button>
   </div>
+  <div class="section"><b>色どうしの関係</b><span class="hint">セルを上下にドラッグ</span></div>
   <div id="matrix"></div>
+  <div id="matrixInfo"></div>
+  <div class="buttons small" id="presets">
+    <button data-preset="random" title="ランダムな関係 (R キーと同じ)">ランダム</button>
+    <button data-preset="self" title="同じ色どうしで集まり、違う色を避ける">同色集合</button>
+    <button data-preset="chase" title="各色が次の色を追いかけ、追われる側は逃げる">追いかけ</button>
+    <button data-preset="symmetric" title="A→B と B→A を同じにする (落ち着いた動きになる)">対称</button>
+    <button data-preset="invert" title="引き合う ⇔ 反発する を入れ替える">反転</button>
+    <button data-preset="zero" title="すべての関係を 0 にする">ゼロ</button>
+  </div>
+  <details id="advanced">
+    <summary>詳細設定</summary>
+    <div id="advRows"></div>
+    <div class="buttons"><button id="btnResetAdv">詳細設定を初期値に戻す</button></div>
+  </details>
   <div id="stats"><span id="fps">FPS --</span><span id="renderer"></span></div>
   <div id="notice"></div>
-  <div id="help">押し続けて「破壊」/ R 創造 / Space 停止 / F 全画面 / H パネル表示切替</div>
+  <div id="help">押し続けて「破壊」/ R 創造 / Space 停止 / F 全画面 / H パネルを隠す・出す</div>
 </div>
 
 <script>
@@ -80,10 +137,12 @@
 /* =====================================================================
  *  定数 (Constants) — 調整したい値はすべてここに集約
  * ===================================================================== */
-const NUM_TYPES          = 6;       // 粒子の色の種類数
+const DEFAULT_TYPES      = 6;       // 粒子の色の種類数 (初期値)
+const MAX_TYPES          = 10;      // 色の種類数の上限 (シェーダの配列サイズ)
 const DEFAULT_COUNT      = 3000;    // 初期粒子数
 const MIN_COUNT          = 500;     // スライダー最小
-const MAX_COUNT          = 8000;    // スライダー最大 (= 配列確保サイズ)
+const MAX_COUNT          = 1000000; // スライダー最大 (= 配列確保サイズ)。GPU 計算が使えるとき
+const MAX_COUNT_CPU      = 30000;   // GPU 計算が使えないときのスライダー最大
 
 const DEFAULT_RMAX       = 60;      // 相互作用半径 [CSS px]
 const MIN_RMAX           = 30;
@@ -112,12 +171,29 @@ const FPS_LOW_DURATION   = 2.0;     // 何秒続いたら削減するか
 const AUTO_REDUCE_FACTOR = 0.8;     // 削減時に掛ける係数
 const FPS_WARMUP         = 2.0;     // 起動直後は計測しない [s]
 
+const MAX_WORKERS        = 16;      // 力の計算を並列化する Worker の最大数
+const WORKER_TIMEOUT_MS  = 3000;    // これ以上 Worker の結果が来なければ壊れたとみなしメインスレッドで計算
+// CPU 版の1ステップで調べるペア数の見積もり (粒子数² × 3×3セルの面積 / 画面面積 / 2) がこれを超えたら
+// 試さずに GPU 計算へ (超巨大な粒子数を CPU で1ステップでも回すと数十秒固まるため)
+const GPU_ON_PAIRS       = 6e6;
+const GPU_OFF_PAIRS      = 2e6;     // GPU から CPU に戻すのは見積もりがこれ未満のときだけ
+const GPU_ON_MS          = 12;      // CPU の力計算 (Worker 待ち含む) がこれを超え続けたら GPU 計算へ [ms]
+const GPU_ON_STEPS       = 5;       // 何ステップ続いたら切り替えるか
+const GPU_OFF_RATIO      = 0.6;     // GPU に切り替えた時の粒子数 × この値 以下になったら CPU に戻す
+const PAR_ON_MS          = 8;       // 力の計算がこれより重くなったら並列化を始める [ms]
+const PAR_OFF_MS         = 4;       // Worker 合計時間がこれより軽くなったら並列化をやめる [ms]
+const IDLE_DRAW_FRAMES   = 256;     // 停止中、変化がないまま この回数描いたら描画を止める (後述)
+
 // 各タイプの色 (RGB 0..1)。色相を等間隔に配置
-const TYPE_COLORS = new Float32Array(NUM_TYPES * 3);
-for (let t = 0; t < NUM_TYPES; t++) {
-  const [r, g, b] = hslToRgb(t / NUM_TYPES, 0.9, 0.6);
-  TYPE_COLORS[t * 3] = r; TYPE_COLORS[t * 3 + 1] = g; TYPE_COLORS[t * 3 + 2] = b;
+let numTypes = DEFAULT_TYPES;      // 今の色の種類数 (UI で変えられる)
+const TYPE_COLORS = new Float32Array(MAX_TYPES * 3);
+function computeTypeColors() {
+  for (let t = 0; t < numTypes; t++) {
+    const [r, g, b] = hslToRgb(t / numTypes, 0.9, 0.6);
+    TYPE_COLORS[t * 3] = r; TYPE_COLORS[t * 3 + 1] = g; TYPE_COLORS[t * 3 + 2] = b;
+  }
 }
+computeTypeColors();
 
 /* =====================================================================
  *  シミュレーション状態 (すべて起動時に確保した型付き配列 — 毎フレームの確保なし)
@@ -139,10 +215,11 @@ const forceY = new Float32Array(MAX_COUNT);
 const NEIGHBOR_DX = [0, 1, -1, 0, 1];
 const NEIGHBOR_DY = [0, 0,  1, 1, 1];
 
-// 引力行列: matrix[i*NUM_TYPES + j] = タイプ i がタイプ j から受ける引力 (-1..1)
-const matrix     = new Float32Array(NUM_TYPES * NUM_TYPES); // 現在使用中の値
-const matrixFrom = new Float32Array(NUM_TYPES * NUM_TYPES); // 補間の始点
-const matrixTo   = new Float32Array(NUM_TYPES * NUM_TYPES); // 補間の終点
+// 引力行列: matrix[i*numTypes + j] = タイプ i がタイプ j から受ける引力 (-1..1)
+// 色の種類数を変えると作り直す (長さは常に numTypes²)
+let matrix     = new Float32Array(DEFAULT_TYPES * DEFAULT_TYPES); // 現在使用中の値
+let matrixFrom = new Float32Array(DEFAULT_TYPES * DEFAULT_TYPES); // 補間の始点
+let matrixTo   = new Float32Array(DEFAULT_TYPES * DEFAULT_TYPES); // 補間の終点
 let matrixLerpT = 1;  // 0..1 (1 = 補間完了)
 
 const params = {
@@ -151,6 +228,16 @@ const params = {
   rMax: DEFAULT_RMAX,        // 実際に使う値 (極端に小さいウィンドウでは制限される)
   halfLife: DEFAULT_HALF_LIFE,
   paused: false,
+  // 「詳細設定」で変えられる値 (初期値は上の定数)
+  timeScale: 1,                      // 時間の速さ (1 ステップで進める時間 = DT × これ)
+  forceFactor: FORCE_FACTOR,
+  beta: BETA,
+  pointSize: POINT_SIZE,
+  pointAlpha: POINT_ALPHA,
+  trailFade: TRAIL_FADE,
+  pointerRadius: POINTER_RADIUS,
+  pointerForce: POINTER_FORCE,
+  lerpTime: MATRIX_LERP_TIME,
 };
 
 // 世界 (トーラス) のサイズ = ウィンドウの CSS ピクセルサイズ
@@ -160,6 +247,14 @@ let worldW = 1, worldH = 1;
 let gridCols = 1, gridRows = 1, cellW = 1, cellH = 1;
 let cellCount = new Int32Array(1);
 let cellStart = new Int32Array(2);
+
+// 力の計算結果に影響する状態 (行列・rMax・グリッド・世界サイズ・粒子数) が変わるたびに増える。
+// Worker が先回りして計算した力が「今の状態」のものかどうかの判定に使う
+let simVersion = 0;
+// 停止中に同じ絵を描き続けているフレーム数 (0 = 直前に何か変わった)
+let idleFrames = 0;
+// GPU 計算エンジン (WebGL2 が使えるときのみ。下で生成)
+let gpu = null;
 
 /* ---------------------------------------------------------------------
  *  入力 — 「破壊」の位置。
@@ -176,35 +271,56 @@ function randomizeParticle(i) {
   posX[i] = Math.random() * worldW;
   posY[i] = Math.random() * worldH;
   velX[i] = 0; velY[i] = 0;
-  type[i] = (Math.random() * NUM_TYPES) | 0;
+  type[i] = (Math.random() * numTypes) | 0;
 }
 
 function randomMatrixInto(target) {
   for (let k = 0; k < target.length; k++) target[k] = Math.random() * 2 - 1;
 }
 
-/** 「創造」: 新しいランダム行列へ MATRIX_LERP_TIME 秒かけて滑らかに移行する */
+/** 「創造」: 新しいランダム行列へ params.lerpTime 秒かけて滑らかに移行する */
 function startCreation() {
   matrixFrom.set(matrix);       // 補間途中でも「今の値」から始める
   randomMatrixInto(matrixTo);
   matrixLerpT = 0;
 }
 
+/** 行列を target へ滑らかに移行する (プリセット用) */
+function lerpMatrixTo(target) {
+  matrixFrom.set(matrix);
+  matrixTo.set(target);
+  matrixLerpT = 0;
+}
+
+/** 係数を1つ直接書き換える (補間中なら止めて、手で決めた値を優先) */
+function setMatrixValue(k, v) {
+  matrixLerpT = 1;
+  matrix[k] = Math.max(-1, Math.min(1, v));
+  simVersion++;
+}
+
 function updateMatrixLerp(dtReal) {
   if (matrixLerpT >= 1) return false;
-  matrixLerpT = Math.min(1, matrixLerpT + dtReal / MATRIX_LERP_TIME);
+  matrixLerpT = params.lerpTime > 0 ? Math.min(1, matrixLerpT + dtReal / params.lerpTime) : 1;
   const s = matrixLerpT * matrixLerpT * (3 - 2 * matrixLerpT); // smoothstep
   for (let k = 0; k < matrix.length; k++) {
     matrix[k] = matrixFrom[k] + (matrixTo[k] - matrixFrom[k]) * s;
   }
+  simVersion++;
   return true;
 }
 
+/** 今の環境で選べる最大粒子数 */
+function maxCount() { return gpu ? MAX_COUNT : MAX_COUNT_CPU; }
+
 function setParticleCount(n) {
-  n = Math.max(MIN_COUNT, Math.min(MAX_COUNT, n | 0));
-  for (let i = params.count; i < n; i++) randomizeParticle(i); // 増えた分だけ生成
+  n = Math.max(MIN_COUNT, Math.min(maxCount(), n | 0));
+  const from = params.count;
+  for (let i = from; i < n; i++) randomizeParticle(i); // 増えた分だけ生成
   params.count = n;
-  renderer.onCountChanged(n);
+  simVersion++; idleFrames = 0;
+  renderer.onCountChanged(n, from);
+  if (gpu && gpu.active && n > from) gpu.uploadRange(from, n);   // GPU 計算中は増えた分だけ送る
 }
 
 /** グリッドの寸法を決める。セル幅は rMax 以上なので 3×3 セルの探索で十分 */
@@ -222,6 +338,7 @@ function rebuildGrid() {
     cellCount = new Int32Array(nCells);
     cellStart = new Int32Array(nCells + 1);
   }
+  simVersion++;
 }
 
 function resize() {
@@ -230,24 +347,19 @@ function resize() {
   worldH = Math.max(1, window.innerHeight);
   // 既存粒子は相対位置を保って新しい世界に拡大縮小
   const sx = worldW / oldW, sy = worldH / oldH;
-  for (let i = 0; i < params.count; i++) {
+  if (gpu && gpu.active) gpu.rescale(sx, sy);   // GPU 計算中は GPU 上で拡大縮小
+  else for (let i = 0; i < params.count; i++) {
     posX[i] = Math.min(posX[i] * sx, worldW - 1e-3);
     posY[i] = Math.min(posY[i] * sy, worldH - 1e-3);
   }
-  rebuildGrid();
+  rebuildGrid();   // simVersion も進む
+  idleFrames = 0;
   renderer.resize(worldW, worldH, Math.min(window.devicePixelRatio || 1, MAX_DPR));
 }
 
 /* =====================================================================
  *  シミュレーション本体
  * ===================================================================== */
-
-/** Particle Life の標準的な力関数。r = d / rMax (0..1), a = 引力係数 */
-function force(r, a) {
-  if (r < BETA) return r / BETA - 1;                                  // 近すぎる → 反発
-  if (r < 1)    return a * (1 - Math.abs(2 * r - 1 - BETA) / (1 - BETA)); // 三角形の引力/斥力
-  return 0;
-}
 
 /** 粒子をセルごとに並べる (計数ソート, O(n)) */
 function binParticles(n) {
@@ -280,9 +392,18 @@ function step(dt) {
   const invRMax = 1 / rMax;
   const halfW = worldW * 0.5, halfH = worldH * 0.5;
   const friction = Math.pow(0.5, dt / params.halfLife); // 半減期型の減衰係数
-  const accScale = rMax * FORCE_FACTOR * dt;
-  const INV_BETA = 1 / BETA, INV_ONE_MINUS_BETA = 1 / (1 - BETA);
+  const accScale = rMax * params.forceFactor * dt;
+  const beta = params.beta, nT = numTypes;
+  const INV_BETA = 1 / beta, INV_ONE_MINUS_BETA = 1 / (1 - beta);
+  const PR = params.pointerRadius, PF = params.pointerForce;
 
+  // 粒子が多すぎて CPU が追いつかないときは GPU で丸ごと計算 (状態も GPU 上に置いたまま)
+  if (gpu && gpu.active) { gpu.step(dt, friction, accScale); return false; }
+
+  // Worker が前のステップの直後に「今の状態」の力を計算済みなら、それを使う
+  // (ビン分けも送信時に済んでいる)。結果は下のループとビット単位で同一。
+  const usedWorkers = par.takeResult(n);
+  if (!usedWorkers) {
   binParticles(n);
 
   // ---- 1) 力の計算 ----
@@ -313,7 +434,7 @@ function step(dt) {
         }
         for (let a = s0; a < e0; a++) {
           const xa = sortX[a] - offX, ya = sortY[a] - offY;
-          const rowA = sortT[a] * NUM_TYPES, ta = sortT[a];
+          const rowA = sortT[a] * nT, ta = sortT[a];
           let fxa = 0, fya = 0;
           for (let b = (m === 0 ? a + 1 : q0); b < q1; b++) {
             const dx = sortX[b] - xa;
@@ -323,7 +444,7 @@ function step(dt) {
             const d = Math.sqrt(d2);
             const r = d * invRMax;
             const invD = 1 / d;
-            if (r < BETA) {
+            if (r < beta) {
               // 近すぎる → タイプに関係なく反発 (対称)
               const sc = (r * INV_BETA - 1) * invD;
               const px = dx * sc, py = dy * sc;
@@ -331,10 +452,10 @@ function step(dt) {
               forceX[b] -= px; forceY[b] -= py;
             } else {
               // 三角形の引力/斥力。係数だけ a→b と b→a で違う
-              const tri = (1 - Math.abs(2 * r - 1 - BETA) * INV_ONE_MINUS_BETA) * invD;
+              const tri = (1 - Math.abs(2 * r - 1 - beta) * INV_ONE_MINUS_BETA) * invD;
               const tb = sortT[b];
               const sa = matrix[rowA + tb] * tri;
-              const sb = matrix[tb * NUM_TYPES + ta] * tri;
+              const sb = matrix[tb * nT + ta] * tri;
               fxa += dx * sa; fya += dy * sa;
               forceX[b] -= dx * sb; forceY[b] -= dy * sb;
             }
@@ -343,6 +464,7 @@ function step(dt) {
         }
       }
     }
+  }
   }
 
   // ---- 力 → 速度 (k はセル順の番号、i は元の粒子番号) ----
@@ -358,9 +480,9 @@ function step(dt) {
       let dy = sortY[k] - input.y;
       if (dy > halfH) dy -= worldH; else if (dy < -halfH) dy += worldH;
       const d2 = dx * dx + dy * dy;
-      if (d2 < POINTER_RADIUS * POINTER_RADIUS && d2 > 1e-6) {
+      if (d2 < PR * PR && d2 > 1e-6) {
         const d = Math.sqrt(d2);
-        const sc = (1 - d / POINTER_RADIUS) * POINTER_FORCE * dt / d;
+        const sc = (1 - d / PR) * PF * dt / d;
         vx += dx * sc; vy += dy * sc;
       }
     }
@@ -376,20 +498,222 @@ function step(dt) {
     while (y < 0) y += worldH; while (y >= worldH) y -= worldH;
     posX[i] = x; posY[i] = y;
   }
+
+  // 次のステップの力を Worker に先回りで計算させる (重いときだけ)
+  par.dispatch(n);
+  return usedWorkers;
 }
 
 /* =====================================================================
+ *  並列計算: 力の計算を Web Worker に分担させる
+ *
+ *  グリッドの行を帯 (バンド) に分け、各 Worker は「自分の行」と「その1つ上の行」を
+ *  元と全く同じセル順に走査し、自分の行の粒子の力だけを書き込む。
+ *  forceX[k] (Float32) への加算が元と同じ順序・同じ演算で行われるので、
+ *  結果はメインスレッドで計算した場合とビット単位で一致する (見た目は一切変わらない)。
+ *
+ *  ステップ N の直後に状態 N の力を送っておき、ステップ N+1 で受け取る。
+ *  その間に行列・rMax・粒子数・画面サイズが変わったら (simVersion で判定) 捨てて、
+ *  従来どおりメインスレッドで計算する。「創造」の補間中は毎フレーム行列が変わるので送らない。
+ * ===================================================================== */
+
+/** 行 [r0, r1) が持つ粒子の力を計算する。Worker 内で実行 (外部変数を参照しないこと) */
+function bandForces(r0, r1, cols, rows, W, H, rMax2, invRMax, beta, nTypes, M, sx, sy, st, cs, fx, fy) {
+  const INV_BETA = 1 / beta, INV_ONE_MINUS_BETA = 1 / (1 - beta);
+  const above = r0 === 0 ? rows - 1 : r0 - 1;   // 下隣として自分の行に作用する行
+  for (let cy = 0; cy < rows; cy++) {             // 走査順は元と同じ (行 0 → 最終行)
+    const aOwn = cy >= r0 && cy < r1;
+    if (!aOwn && cy !== above) continue;
+    const ny1 = cy + 1 >= rows ? 0 : cy + 1;
+    const offYDown = cy + 1 >= rows ? H : 0;
+    const downOwn = ny1 >= r0 && ny1 < r1;
+    for (let cx = 0; cx < cols; cx++) {
+      const c = cy * cols + cx;
+      const s0 = cs[c], e0 = cs[c + 1];
+      if (s0 === e0) continue;
+      for (let m = 0; m < 5; m++) {   // 0: 同じセル, 1: 右, 2: 左下, 3: 下, 4: 右下 (元と同順)
+        let q0, q1, offX = 0, offY = 0, bOwn;
+        if (m === 0) { q0 = s0; q1 = e0; bOwn = aOwn; }
+        else {
+          let nx = (m === 1 || m === 4) ? cx + 1 : (m === 2 ? cx - 1 : cx);
+          let ny = cy;
+          if (nx < 0) { nx += cols; offX = -W; } else if (nx >= cols) { nx -= cols; offX = W; }
+          if (m === 1) bOwn = aOwn;
+          else { ny = ny1; offY = offYDown; bOwn = downOwn; }
+          const q = ny * cols + nx;
+          q0 = cs[q]; q1 = cs[q + 1];
+          if (q0 === q1) continue;
+        }
+        if (!aOwn && !bOwn) continue;
+        for (let a = s0; a < e0; a++) {
+          const xa = sx[a] - offX, ya = sy[a] - offY;
+          const rowA = st[a] * nTypes, ta = st[a];
+          let fxa = 0, fya = 0;
+          for (let b = (m === 0 ? a + 1 : q0); b < q1; b++) {
+            const dx = sx[b] - xa;
+            const dy = sy[b] - ya;
+            const d2 = dx * dx + dy * dy;
+            if (d2 >= rMax2 || d2 === 0) continue;
+            const d = Math.sqrt(d2);
+            const r = d * invRMax;
+            const invD = 1 / d;
+            if (r < beta) {
+              const sc = (r * INV_BETA - 1) * invD;
+              const px = dx * sc, py = dy * sc;
+              fxa += px; fya += py;
+              if (bOwn) { fx[b] -= px; fy[b] -= py; }
+            } else {
+              const tri = (1 - Math.abs(2 * r - 1 - beta) * INV_ONE_MINUS_BETA) * invD;
+              const tb = st[b];
+              const sa = M[rowA + tb] * tri;
+              const sb = M[tb * nTypes + ta] * tri;
+              fxa += dx * sa; fya += dy * sa;
+              if (bOwn) { fx[b] -= dx * sb; fy[b] -= dy * sb; }
+            }
+          }
+          if (aOwn) { fx[a] += fxa; fy[a] += fya; }
+        }
+      }
+    }
+  }
+}
+
+function workerMain() {
+  let fx = new Float32Array(0), fy = new Float32Array(0);
+  self.onmessage = (e) => {
+    const j = e.data;
+    if (fx.length < j.n) { fx = new Float32Array(j.n); fy = new Float32Array(j.n); }
+    const t0 = performance.now();
+    const s = j.cs[j.r0 * j.cols], t = j.cs[j.r1 * j.cols];   // 自分の粒子 (セル順で連続)
+    fx.fill(0, s, t); fy.fill(0, s, t);
+    bandForces(j.r0, j.r1, j.cols, j.rows, j.W, j.H, j.rMax2, j.invRMax, j.beta, j.nTypes,
+               j.M, j.sx, j.sy, j.st, j.cs, fx, fy);
+    const ox = fx.slice(s, t), oy = fy.slice(s, t);
+    self.postMessage({ job: j.job, s, ox, oy, ms: performance.now() - t0 }, [ox.buffer, oy.buffer]);
+  };
+}
+
+const par = (() => {
+  const workers = [];
+  try {
+    const hc = navigator.hardwareConcurrency || 2;
+    const nW = Math.max(1, Math.min(MAX_WORKERS, hc - 1));
+    if (hc >= 2 && typeof Worker !== 'undefined') {
+      const src = `'use strict';\n${bandForces.toString()}\n(${workerMain.toString()})();`;
+      const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+      for (let i = 0; i < nW; i++) workers.push(new Worker(url));
+    }
+  } catch (e) { console.warn('Worker 初期化失敗 (メインスレッドで計算します):', e); workers.length = 0; }
+
+  let job = 0;            // 送信ごとの番号。古い返信を捨てるのに使う
+  let jobVersion = -1, jobN = 0, jobTime = 0;
+  let waiting = 0;        // 未着の返信数 (0 かつ job 有効 = 力が揃っている)
+  let jobCpuMs = 0;       // そのジョブで全 Worker が使った計算時間の合計
+  let active = false;     // 重いときだけ並列化 (軽いときは余計な CPU を使わない)
+  let enabled = workers.length > 0;
+  const rowCost = new Float64Array(1024);
+
+  function disable(e) {
+    if (!enabled) return;
+    console.warn('Worker エラー (メインスレッドで計算します):', e);
+    enabled = false; job++;
+    workers.forEach((w) => w.terminate());
+  }
+  workers.forEach((w) => {
+    w.onerror = disable;
+    w.onmessage = (e) => {
+      const r = e.data;
+      if (r.job !== job) return;                  // 古いジョブ
+      forceX.set(r.ox, r.s); forceY.set(r.oy, r.s);
+      jobCpuMs += r.ms;
+      if (--waiting === 0) {
+        lastLatencyMs = performance.now() - jobTime;
+        // 全 Worker の合計時間 ≒ 1 スレッドで計算した場合の時間。軽くなったら並列化をやめる
+        if (jobCpuMs < PAR_OFF_MS) active = false;
+      }
+    };
+  });
+  let lastLatencyMs = 0;  // 直近のジョブで、送ってから全員の結果が揃うまでの時間
+
+  return {
+    get count() { return enabled ? workers.length : 0; },
+    get lastLatencyMs() { return lastLatencyMs; },
+    /** 送ってから今までの経過時間 (結果待ちのとき) */
+    get pendingMs() { return waiting > 0 ? performance.now() - jobTime : 0; },
+    /** メインスレッドで力を計算したステップの時間から、並列化を始めるか決める */
+    observe(stepMs) {
+      if (enabled && !active && stepMs > PAR_ON_MS) active = true;
+    },
+    /** 現在の状態 (粒子数 n) の力が揃っていれば true (forceX/forceY とビン分けは設定済み)。
+     *  ジョブは使っても使わなくてもこの呼び出しで無効になる (遅れて届いた返信は捨てる) */
+    takeResult(n) {
+      const ok = enabled && jobVersion === simVersion && jobN === n && waiting === 0;
+      jobVersion = -1; job++;
+      return ok;
+    },
+    /** まだ届いていない有効なジョブがあるか (あればこのフレームは step を待つ) */
+    inFlight(n) {
+      return enabled && jobVersion === simVersion && jobN === n && waiting > 0 &&
+             performance.now() - jobTime <= WORKER_TIMEOUT_MS;
+    },
+    dispatch(n) {
+      if (!enabled || !active || matrixLerpT < 1) return;
+      binParticles(n);   // 次のステップの分を今ビン分けしておく (step では再利用)
+      const cols = gridCols, rows = gridRows;
+      // 各行の計算量を「セル内の粒子数 × (自分の半分 + 前方4セル)」で見積もり、均等に分ける
+      let total = 0;
+      for (let cy = 0; cy < rows; cy++) {
+        let rc = 0;
+        const ny = cy + 1 >= rows ? 0 : cy + 1;
+        for (let cx = 0; cx < cols; cx++) {
+          const c = cy * cols + cx, k = cellStart[c + 1] - cellStart[c];
+          if (k === 0) continue;
+          const xr = cx + 1 >= cols ? 0 : cx + 1, xl = cx === 0 ? cols - 1 : cx - 1;
+          const cnt = (q) => cellStart[q + 1] - cellStart[q];
+          rc += k * (k * 0.5 + cnt(cy * cols + xr) + cnt(ny * cols + xl) + cnt(ny * cols + cx) + cnt(ny * cols + xr));
+        }
+        rowCost[cy] = rc; total += rc;
+      }
+      const nb = Math.min(workers.length, rows);
+      job++; jobVersion = simVersion; jobN = n; jobTime = performance.now(); waiting = 0; jobCpuMs = 0;
+      const base = {
+        job, n, cols, rows, W: worldW, H: worldH, rMax2: params.rMax * params.rMax, invRMax: 1 / params.rMax,
+        beta: params.beta, nTypes: numTypes, M: matrix.slice(),
+        sx: sortX.slice(0, n), sy: sortY.slice(0, n), st: sortT.slice(0, n),
+        cs: cellStart.slice(0, cols * rows + 1), r0: 0, r1: 0,
+      };
+      let r0 = 0, acc = 0;
+      for (let w = 0; w < nb && r0 < rows; w++) {
+        let r1 = r0;
+        const target = total * (w + 1) / nb;
+        do { acc += rowCost[r1]; r1++; } while (r1 < rows && acc + rowCost[r1] * 0.5 <= target && rows - r1 > nb - w - 1);
+        if (w === nb - 1) { for (; r1 < rows; r1++) acc += rowCost[r1]; }
+        base.r0 = r0; base.r1 = r1;
+        workers[w].postMessage(base);
+        waiting++;
+        r0 = r1;
+      }
+    },
+  };
+})();
+
+/* =====================================================================
  *  描画: WebGL (加算合成 + ソフトグロー + 残像)。使えなければ Canvas2D
- *  どちらも { name, resize(w,h,dpr), onCountChanged(n), draw(n) } を持つ
+ *  どちらも { name, resize(w,h,dpr), onCountChanged(n, from), draw(n) } を持つ。
+ *  WebGL 版はさらに GPU 計算エンジン用に { gl, isGL2, quadBuf, program } を公開する
  * ===================================================================== */
 const canvas = document.getElementById('view');
 
 function createWebGLRenderer() {
-  const gl = canvas.getContext('webgl', {
+  const ctxAttribs = {
     alpha: false, antialias: false, depth: false, stencil: false,
     preserveDrawingBuffer: true,   // 残像のため前フレームを保持
     powerPreference: 'high-performance',
-  });
+  };
+  // WebGL2 なら GPU 計算エンジンも使える。描画自体は WebGL1 と同じシェーダ・同じ手順
+  let gl = canvas.getContext('webgl2', ctxAttribs);
+  let isGL2 = !!gl;
+  if (!gl) gl = canvas.getContext('webgl', ctxAttribs);
   if (!gl) return null;
 
   function compile(kind, src) {
@@ -409,14 +733,17 @@ function createWebGLRenderer() {
   }
 
   // 粒子: 位置 (CSS px) とタイプを受け取り、点スプライトとして描く
+  // x, y は posX / posY をそのまま別々のバッファで受け取る (詰め替え不要)
   const pointProg = program(`
-    attribute vec2 aPos;
+    attribute float aX;
+    attribute float aY;
     attribute float aType;
     uniform vec2 uWorld;
     uniform float uSize;
-    uniform vec3 uColors[${NUM_TYPES}];
+    uniform vec3 uColors[${MAX_TYPES}];
     varying vec3 vColor;
     void main() {
+      vec2 aPos = vec2(aX, aY);
       vec2 clip = aPos / uWorld * 2.0 - 1.0;
       gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
       gl_PointSize = uSize;
@@ -432,7 +759,7 @@ function createWebGLRenderer() {
       // 明るい芯 + 柔らかい外周 = 安価なグロー
       float glow = exp(-d2 * 5.0) + (1.0 - d2) * 0.15;
       gl_FragColor = vec4(vColor * glow * uAlpha, 1.0);
-    }`, ['aPos', 'aType']);
+    }`, ['aX', 'aY', 'aType']);
 
   // 全画面四角形: 残像のフェード用
   const fadeProg = program(`
@@ -448,20 +775,61 @@ function createWebGLRenderer() {
   const uAlpha  = gl.getUniformLocation(pointProg, 'uAlpha');
   const uFadeColor = gl.getUniformLocation(fadeProg, 'uColor');
 
-  gl.useProgram(pointProg);
-  gl.uniform3fv(uColors, TYPE_COLORS);
-  gl.uniform1f(uAlpha, POINT_ALPHA);
+
+  // GPU 計算中の描画: 位置を GPU 上の状態テクスチャから直接読む (CPU への読み戻し・転送なし)。
+  // 点の形・色・明るさの計算は上の pointProg と同一
+  let texProg = null, uTexWorld, uTexSize, uTexState, uTexW, uTexAlpha, uTexColors;
+  if (isGL2) try {
+    texProg = program(`#version 300 es
+      layout(location = 0) in float aType;
+      uniform highp sampler2D uState;
+      uniform int uTexW;
+      uniform vec2 uWorld;
+      uniform float uSize;
+      uniform vec3 uColors[${MAX_TYPES}];
+      out vec3 vColor;
+      void main() {
+        vec2 aPos = texelFetch(uState, ivec2(gl_VertexID % uTexW, gl_VertexID / uTexW), 0).xy;
+        vec2 clip = aPos / uWorld * 2.0 - 1.0;
+        gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+        gl_PointSize = uSize;
+        vColor = uColors[int(aType + 0.5)];
+      }`, `#version 300 es
+      precision mediump float;
+      in vec3 vColor;
+      uniform float uAlpha;
+      out vec4 outColor;
+      void main() {
+        vec2 p = gl_PointCoord * 2.0 - 1.0;
+        float d2 = dot(p, p);
+        if (d2 > 1.0) discard;
+        float glow = exp(-d2 * 5.0) + (1.0 - d2) * 0.15;
+        outColor = vec4(vColor * glow * uAlpha, 1.0);
+      }`, ['aType']);
+    uTexWorld = gl.getUniformLocation(texProg, 'uWorld');
+    uTexSize  = gl.getUniformLocation(texProg, 'uSize');
+    uTexState = gl.getUniformLocation(texProg, 'uState');
+    uTexW     = gl.getUniformLocation(texProg, 'uTexW');
+    uTexAlpha = gl.getUniformLocation(texProg, 'uAlpha');
+    uTexColors = gl.getUniformLocation(texProg, 'uColors');
+    gl.useProgram(texProg);
+    gl.uniform1i(uTexState, 0);
+  } catch (e) { console.warn('GPU 計算用の描画シェーダを作れません (CPU で計算します):', e); texProg = null; isGL2 = false; }
 
   const quadBuf = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
 
-  // 頂点データ: [x, y, type] × MAX_COUNT。GPU 側バッファも最大サイズで確保
-  const vertData = new Float32Array(MAX_COUNT * 3);
-  let vertView = vertData.subarray(0, DEFAULT_COUNT * 3); // 粒子数変更時のみ作り直す
-  const pointBuf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, pointBuf);
-  gl.bufferData(gl.ARRAY_BUFFER, vertData.byteLength, gl.DYNAMIC_DRAW);
+  // 頂点データ: x, y (毎フレーム転送) と type (粒子数が変わったときだけ転送)。GPU 側は最大サイズで確保
+  const typeData = new Float32Array(MAX_COUNT);
+  let xView = posX.subarray(0, DEFAULT_COUNT), yView = posY.subarray(0, DEFAULT_COUNT); // 粒子数変更時のみ作り直す
+  const xBuf = gl.createBuffer(), yBuf = gl.createBuffer(), typeBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, xBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, MAX_COUNT * 4, gl.DYNAMIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, yBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, MAX_COUNT * 4, gl.DYNAMIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, typeBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, MAX_COUNT * 4, gl.STATIC_DRAW);
 
   const sizeRange = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE);
   gl.disable(gl.DEPTH_TEST);
@@ -469,9 +837,24 @@ function createWebGLRenderer() {
   gl.clearColor(0, 0, 0, 1);
 
   let dpr = 1;
+  /** 点の大きさ・明るさを反映 (詳細設定で変えたとき) */
+  function applyStyle() {
+    const size = Math.min(params.pointSize * dpr, sizeRange[1]);
+    gl.useProgram(pointProg);
+    gl.uniform1f(uSize, size); gl.uniform1f(uAlpha, params.pointAlpha);
+    gl.uniform3fv(uColors, TYPE_COLORS);
+    if (texProg) {
+      gl.useProgram(texProg);
+      gl.uniform1f(uTexSize, size); gl.uniform1f(uTexAlpha, params.pointAlpha);
+      gl.uniform3fv(uTexColors, TYPE_COLORS);
+    }
+  }
+  applyStyle();
 
   return {
     name: 'WebGL',
+    gl, isGL2, quadBuf, program,
+    applyStyle,
     resize(w, h, newDpr) {
       dpr = newDpr;
       canvas.width = Math.round(w * dpr);
@@ -479,10 +862,17 @@ function createWebGLRenderer() {
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.useProgram(pointProg);
       gl.uniform2f(uWorld, w, h);
-      gl.uniform1f(uSize, Math.min(POINT_SIZE * dpr, sizeRange[1]));
+      if (texProg) { gl.useProgram(texProg); gl.uniform2f(uTexWorld, w, h); }
+      applyStyle();
       gl.clear(gl.COLOR_BUFFER_BIT);
     },
-    onCountChanged(n) { vertView = vertData.subarray(0, n * 3); },
+    onCountChanged(n, from = 0) {
+      xView = posX.subarray(0, n); yView = posY.subarray(0, n);
+      if (n <= from) return;                       // 減ったときは送り直さない
+      for (let i = from; i < n; i++) typeData[i] = type[i];
+      gl.bindBuffer(gl.ARRAY_BUFFER, typeBuf);
+      gl.bufferSubData(gl.ARRAY_BUFFER, from * 4, typeData.subarray(from, n));
+    },
     draw(n) {
       // --- 残像: 前フレームを暗くする (乗算) → 少しだけ引く (8bit の残りカス対策) ---
       gl.useProgram(fadeProg);
@@ -490,9 +880,10 @@ function createWebGLRenderer() {
       gl.enableVertexAttribArray(0);
       gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
       gl.disableVertexAttribArray(1);
+      gl.disableVertexAttribArray(2);
       gl.blendEquation(gl.FUNC_ADD);
       gl.blendFunc(gl.ZERO, gl.ONE_MINUS_SRC_ALPHA);      // dst *= (1 - fade)
-      gl.uniform4f(uFadeColor, 0, 0, 0, TRAIL_FADE);
+      gl.uniform4f(uFadeColor, 0, 0, 0, params.trailFade);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       gl.blendEquation(gl.FUNC_REVERSE_SUBTRACT);          // dst -= floor
       gl.blendFunc(gl.ONE, gl.ONE);
@@ -500,16 +891,32 @@ function createWebGLRenderer() {
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
       // --- 粒子: 加算合成 ---
-      for (let i = 0, k = 0; i < n; i++, k += 3) {
-        vertData[k] = posX[i]; vertData[k + 1] = posY[i]; vertData[k + 2] = type[i];
+      if (gpu && gpu.active) {
+        gl.useProgram(texProg);
+        gl.uniform1i(uTexW, gpu.texW);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, gpu.stateTexture);
+        gl.bindBuffer(gl.ARRAY_BUFFER, typeBuf);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 1, gl.FLOAT, false, 0, 0);
+        gl.disableVertexAttribArray(1);
+        gl.blendEquation(gl.FUNC_ADD);
+        gl.blendFunc(gl.ONE, gl.ONE);
+        gl.drawArrays(gl.POINTS, 0, n);
+        return;
       }
       gl.useProgram(pointProg);
-      gl.bindBuffer(gl.ARRAY_BUFFER, pointBuf);
-      gl.bufferSubData(gl.ARRAY_BUFFER, 0, vertView);
+      gl.bindBuffer(gl.ARRAY_BUFFER, xBuf);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, xView);
       gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 1, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, yBuf);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, yView);
       gl.enableVertexAttribArray(1);
-      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 12, 0);
-      gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 12, 8);
+      gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, typeBuf);
+      gl.enableVertexAttribArray(2);
+      gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 0, 0);
       gl.blendEquation(gl.FUNC_ADD);
       gl.blendFunc(gl.ONE, gl.ONE);
       gl.drawArrays(gl.POINTS, 0, n);
@@ -517,18 +924,719 @@ function createWebGLRenderer() {
   };
 }
 
+/* =====================================================================
+ *  GPU 計算エンジン (WebGL2 + 浮動小数テクスチャ)
+ *
+ *  粒子が多すぎて CPU (Worker 並列) が追いつかないときに使う。状態は GPU 上に置いたまま:
+ *    1) 各粒子のセル番号を求める          (keys: [セル, 粒子番号]。粒子数ぶんの行だけ)
+ *    2) 昇順だけのバイトニックソートでセル順に並べる (間隔 16 未満の比較は 16 個まとめて1パス)
+ *    3) 各セルの開始位置を二分探索で求める
+ *    4) 位置・タイプ・粒子番号をセル順に詰め直す
+ *    5) セル順に (= 近くの粒子どうしをまとめて) 、半径 rMax の円に掛かるセルだけを走査して力を求め、
+ *       速度・位置を更新して result へ書く。近傍は 4 個ずつ先読み、係数は小さなテクスチャから読む
+ *       (セルは rMax/5 角 (セル数が多すぎる画面では粗く)。行ごとに円の弦の範囲だけを1区間として読む)
+ *    6) result を粒子番号の位置へ書き戻す (1画素の点を粒子数だけ描く)
+ *  5) は描画命令を分けて出す。分け方は、力のパスが数えた近傍候補の数を数ステップおきに非同期で読み戻した実測による
+ *  テクスチャやシェーダは初めて GPU 計算に切り替えたときに作る (使わなければメモリを使わない)
+ *  描画は状態テクスチャから直接位置を読む。力の式・摩擦・破壊・トーラスは CPU 版と同じ。
+ *  (GPU は 32bit 浮動小数で計算するため、CPU 版とは丸め誤差の分だけ値が異なる)
+ * ===================================================================== */
+function createGpuSim(r) {
+  const gl = r.gl;
+  if (!r.isGL2 || !gl.getExtension('EXT_color_buffer_float')) return null;
+
+  const TEXW = 1024;
+  const stateRows = Math.ceil(MAX_COUNT / TEXW);
+  // 力のパスで、セル順に連続する粒子を置く画素のタイル (幅×高さ。2 のべき乗)
+  const TILE_LOG_W = 2, TILE_LOG_H = 3, TILE_W = 1 << TILE_LOG_W, TILE_H = 1 << TILE_LOG_H;
+  const SORT_LOCAL = 16;                      // ソートで1パスにまとめる塊の大きさ (2 のべき乗)
+  let npadMax = 1024; while (npadMax < MAX_COUNT) npadMax *= 2;
+  const keyRowsMax = npadMax / TEXW;
+  const CELL_ROWS = 1024;                     // (セル数 × 色数) の上限 = TEXW × CELL_ROWS - 1
+  const MAX_CELLS = TEXW * CELL_ROWS - 1;
+  // 力のパスは描画命令を分けて出す (1回が長いと OS が GPU をリセットするため)。
+  // 仕事量 = 各粒子が調べる近傍候補の数。力のパスが粒子ごとに数えて GPU 上で区画ごとに合計し、
+  // 数ステップおきに非同期で読み戻す (待たない)。その実測で、1回の仕事がそろうように区切る。
+  // 実測がまだない (粒子数を変えた直後など) ときは、一様分布での見積もり × 凝集の分の係数で均等に分ける。
+  // さらに実際のフレーム時間が長ければ細かく分ける
+  const WORK_PER_DRAW = 2e8;                  // 1回の描画命令で調べる近傍候補の目安
+  const CLUSTER_FACTOR = 4;                   // 見積もり時: 凝集で候補が一様分布より増える分の見込み
+  let drawsHint = 1;                          // 実測から決めた最低分割数
+  const TARGET_DRAW_MS = 50;                  // 描画命令 1 回の目標時間 [ms]
+  const MAX_DRAWS = 4096;                     // 分割数の上限 (命令を出すこと自体の負担を抑える)
+  const FLUSH_WORK = 2e9;                     // これだけの近傍候補の仕事ごとに GPU へ送る (gl.flush)
+  const FLUSH_EVERY_SLOW = 4;                 // 実測で遅いときは描画命令この回数ごとに送る
+  const WORK_CHUNK = 64;                      // 仕事量を合計する区画の幅 (1行を 1024/64 = 16 区画)
+  const MEASURE_EVERY = 4;                    // 仕事量を測るステップ間隔
+  // GPU 用のグリッド (CPU 版とは別)。セル = rMax / sub。sub >= 2 なら走査範囲が重ならない。
+  // セルが細かいほど円に沿って無駄なく読める (行が増える負担と釣り合うのが sub = 5 前後)。
+  // 並び順は (セルの行, 色, セルの列)。行と色が同じなら列方向に連続するので、
+  // 「ある行のある色」の候補が1区間で読め、係数は区間ごとに1回だけ引けばよい
+  const GPU_SUB = 5;
+  let gCols = 1, gRows = 1, gCellW = 1, gCellH = 1, gTypes = 1;
+  function gpuGrid() {
+    for (let sub = GPU_SUB; sub >= 2; sub--) {
+      const c = Math.floor(worldW * sub / params.rMax), rr = Math.floor(worldH * sub / params.rMax);
+      if (c * rr * numTypes <= MAX_CELLS) {
+        gCols = c; gRows = rr; gCellW = worldW / c; gCellH = worldH / rr; gTypes = numTypes; return true;
+      }
+    }
+    return false;
+  }
+  if (gl.getParameter(gl.MAX_TEXTURE_SIZE) < Math.max(TEXW, keyRowsMax)) return null;
+
+  function build() {
+    function tex(fmt, w, h) {
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, fmt, w, h);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      const fb = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+      const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      if (!ok) throw new Error('float framebuffer incomplete');
+      return { t, fb };
+    }
+    const state  = [tex(gl.RGBA32F, TEXW, stateRows), tex(gl.RGBA32F, TEXW, stateRows)]; // x, y, vx, vy
+    const types  = tex(gl.R32F, TEXW, stateRows);
+    const keys   = [tex(gl.RG32F, TEXW, keyRowsMax), tex(gl.RG32F, TEXW, keyRowsMax)];  // セル, 粒子番号
+    const sorted = tex(gl.RGBA32F, TEXW, keyRowsMax);                                    // x, y, type, 粒子番号 (セル順)
+    // 近傍の走査用: 1画素に2粒子分の位置 (x0, y0, x1, y1)。読み込み回数が半分になる
+    // (力のパスは読み込みの回数で頭打ちになっている)
+    const spos   = tex(gl.RGBA32F, TEXW, keyRowsMax / 2);
+    const cells  = tex(gl.R32F, TEXW, CELL_ROWS);                                        // 各セルの開始位置
+    const fRowsMax = Math.ceil(stateRows / TILE_H) * TILE_H;
+    const result = tex(gl.RGBA32F, TEXW, fRowsMax);                                      // 力のパスの結果 (セル順, タイル配置)
+    // 仕事量の実測: 力のパスが result と同時に粒子ごとの候補数を workTex に書く (MRT)。
+    // workSum = 各行の 16 区画の合計 (1 画素に 4 区画)。使えない環境では実測なしで動く
+    const workTex = tex(gl.R32F, TEXW, fRowsMax);
+    const CHUNKS = TEXW / WORK_CHUNK;
+    const workSum = tex(gl.RGBA32F, CHUNKS / 4, fRowsMax);
+    let forceFb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, forceFb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, result.t, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, workTex.t, 0);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) forceFb = null;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const workPbo = gl.createBuffer();
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, workPbo);
+    gl.bufferData(gl.PIXEL_PACK_BUFFER, CHUNKS * fRowsMax * 4, gl.STREAM_READ);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    const workIo = new Float32Array(CHUNKS * fRowsMax);
+    // 係数行列 (行 = 自分の色, 列 = 相手の色)。uniform 配列を粒子ごとに違う添字で読むより速い
+    const mtex   = tex(gl.R32F, MAX_TYPES, MAX_TYPES);
+    const mIo    = new Float32Array(MAX_TYPES * MAX_TYPES);
+
+    const VS = `#version 300 es
+      layout(location = 0) in vec2 aPos;
+      void main() { gl_Position = vec4(aPos, 0.0, 1.0); }`;
+    const HEAD = `#version 300 es
+      precision highp float; precision highp int; precision highp sampler2D;
+      layout(location = 0) out vec4 o;
+      ivec2 at(int i, int w) { return ivec2(i & 1023, i >> 10); }   // テクスチャ幅は 1024 固定
+      int here(int w) { ivec2 p = ivec2(gl_FragCoord.xy); return p.y * w + p.x; }
+      `;
+    // セル番号 (keys パスと力のパスで同じ式を使う)
+    const CELL_OF = `
+      uniform vec2 uCell; uniform int uCols, uRows;
+      ivec2 cellOf(vec2 p) {
+        return ivec2(min(int(p.x / uCell.x), uCols - 1), min(int(p.y / uCell.y), uRows - 1));
+      }`;
+    function prog(fs, names) {
+      const p = r.program(VS, HEAD + fs, ['aPos']);
+      const u = {};
+      for (const n of names) u[n] = gl.getUniformLocation(p, n);
+      return { p, u };
+    }
+
+    // キー = (セルの行 × 色数 + 色) × 列数 + セルの列
+    const keyP = prog(CELL_OF + `
+      uniform sampler2D uState, uType; uniform int uN, uW, uNT;
+      void main() {
+        int s = here(uW);
+        if (s >= uN) { o = vec4(1.0e9, float(s), 0.0, 0.0); return; }   // 余りは末尾へ
+        ivec2 c = cellOf(texelFetch(uState, at(s, uW), 0).xy);
+        int t = int(texelFetch(uType, at(s, uW), 0).x + 0.5);
+        o = vec4(float((c.y * uNT + t) * uCols + c.x), float(s), 0.0, 0.0);
+      }`, ['uState', 'uType', 'uN', 'uW', 'uNT', 'uCell', 'uCols', 'uRows']);
+
+    // ソート: 昇順だけのバイトニック (各段の最初は区間を折り返して比べる)。
+    // 比べた2つのうち番号の小さい側へ小さいキーを置くので、位置 >= n の「無限大」は最後まで動かない
+    // → 粒子数ぶんの行だけ処理し、位置 >= n は読まずに無限大として扱う
+    const KEY_AT = `
+      vec2 keyAt(int i) { return i < uN ? texelFetch(uKeys, at(i, uW), 0).xy : vec2(1.0e9, float(i)); }
+      bool less(vec2 a, vec2 b) { return a.x < b.x || (a.x == b.x && a.y < b.y); }`;
+    const sortP = prog(`
+      uniform sampler2D uKeys; uniform int uW, uN, uJ, uFlip;
+      ${KEY_AT}
+      void main() {
+        int s = here(uW), t = uFlip == 1 ? s ^ (2 * uJ - 1) : s ^ uJ;
+        vec2 a = keyAt(s), b = keyAt(t);
+        o = vec4((s < t) == less(a, b) ? a : b, 0.0, 0.0);   // 小さい番号の側 = 小さいキー
+      }`, ['uKeys', 'uW', 'uN', 'uJ', 'uFlip']);
+    // 間隔が SORT_LOCAL / 2 以下の比較は、SORT_LOCAL 個の塊をまとめて読んで1パスで済ませる
+    // (uLocal = 1: 塊の中を最初から並べる / 0: 各段の残りの間隔 SORT_LOCAL/2 .. 1 だけ)
+    const ce = (a, b) => `{ bool w = less(e[${b}], e[${a}]); vec2 x = e[${a}]; e[${a}] = w ? e[${b}] : x; e[${b}] = w ? x : e[${b}]; }`;
+    const layer = (j, flip) => {
+      let src = '';
+      for (let i = 0; i < SORT_LOCAL; i++) {
+        const t = flip ? i ^ (2 * j - 1) : i ^ j;
+        if (i < t) src += ce(i, t);
+      }
+      return src;
+    };
+    let fullNet = '';
+    for (let k = 2; k <= SORT_LOCAL; k *= 2) {
+      fullNet += layer(k / 2, true);
+      for (let j = k / 4; j >= 1; j /= 2) fullNet += layer(j, false);
+    }
+    let tailNet = '';
+    for (let j = SORT_LOCAL / 2; j >= 1; j /= 2) tailNet += layer(j, false);
+    const sortLocalP = prog(`
+      uniform sampler2D uKeys; uniform int uW, uN, uLocal;
+      ${KEY_AT}
+      void main() {
+        int s = here(uW), base = s & ${~(SORT_LOCAL - 1)};
+        vec2 e[${SORT_LOCAL}];
+        for (int i = 0; i < ${SORT_LOCAL}; i++) e[i] = keyAt(base + i);
+        if (uLocal == 1) { ${fullNet} } else { ${tailNet} }
+        o = vec4(e[s & ${SORT_LOCAL - 1}], 0.0, 0.0);
+      }`, ['uKeys', 'uW', 'uN', 'uLocal']);
+
+    const cellP = prog(`
+      uniform sampler2D uKeys; uniform int uW, uN, uCells;
+      void main() {
+        int c = here(uW);
+        if (c > uCells) { o = vec4(0.0); return; }
+        float fc = float(c);
+        int lo = 0, hi = uN;                           // 最初に key >= c となる位置 (なければ n)
+        while (lo < hi) {
+          int mid = (lo + hi) >> 1;
+          if (texelFetch(uKeys, at(mid, uW), 0).x < fc) lo = mid + 1; else hi = mid;
+        }
+        o = vec4(float(lo), 0.0, 0.0, 0.0);
+      }`, ['uKeys', 'uW', 'uN', 'uCells']);
+
+    const gatherP = prog(`
+      uniform sampler2D uKeys, uState, uType; uniform int uW, uN;
+      void main() {
+        int s = here(uW);
+        if (s >= uN) { o = vec4(0.0); return; }
+        int i = int(texelFetch(uKeys, at(s, uW), 0).y);
+        o = vec4(texelFetch(uState, at(i, uW), 0).xy, texelFetch(uType, at(i, uW), 0).x, float(i));
+      }`, ['uKeys', 'uState', 'uType', 'uW', 'uN']);
+    // セル順の位置を2粒子ずつ1画素に詰める
+    const packP = prog(`
+      uniform sampler2D uSorted; uniform int uW;
+      void main() {
+        int k = here(uW);
+        o = vec4(texelFetch(uSorted, at(2 * k, uW), 0).xy, texelFetch(uSorted, at(2 * k + 1, uW), 0).xy);
+      }`, ['uSorted', 'uW']);
+
+    // 近傍の位置 b 1個ぶんの力を f に足す (範囲外 / 自分自身は足さない)。m = この区間の色との係数
+    const ACC = (b) => `{
+              vec2 d = ${b} - pa; float d2 = dot(d, d);
+              if (d2 < rMax2 && d2 != 0.0) {
+                float invD = inversesqrt(d2);
+                float rr = d2 * invD * invRMax;
+                float k = rr < BETA ? rr * INV_BETA - 1.0 : m * (1.0 - abs(2.0 * rr - 1.0 - BETA) * INV_OMB);
+                f += d * (k * invD);
+              } }`;
+    const stepP = prog(CELL_OF + `
+      uniform sampler2D uState, uSorted, uSPos, uCells, uMat;
+      uniform int uW, uN, uNT;
+      uniform vec2 uWorld;
+      uniform float uRMax, uFriction, uAccScale, uDt;
+      uniform vec3 uInput;                              // x, y, 有効 (1/0)
+      uniform float uBeta, uPR, uPF;                   // 反発距離, 破壊の半径・強さ
+      layout(location = 1) out vec4 oWork;             // 調べた近傍候補の数 (分割の目安用)
+      // トーラスで回り込み: CPU 版と同じく、負なら幅を足し、幅以上なら引いて範囲内へ
+      // (負から足した結果が丸めで幅ちょうどになっても引かない。CPU 版もそのまま保存する)。
+      // 1ステップで1周以上動いた (極端な設定の) ときは、繰り返す代わりに剰余で戻す
+      float wrapAxis(float x, float w) {
+        if (x < 0.0) {
+          x += w;
+          if (x < 0.0) x = clamp(x - floor(x / w) * w, 0.0, w);
+        } else if (x >= w) {
+          x -= w;
+          if (x >= w) x = clamp(x - floor(x / w) * w, 0.0, w);
+        }
+        return x;
+      }
+      // 画素 → セル順の番号。TILE_W × TILE_H 画素のタイルに連続する番号を入れる
+      int tileIndex(ivec2 p) {
+        return (((p.y >> ${TILE_LOG_H}) * ${TEXW / TILE_W} + (p.x >> ${TILE_LOG_W})) << ${TILE_LOG_W + TILE_LOG_H})
+             + ((p.y & ${TILE_H - 1}) << ${TILE_LOG_W}) + (p.x & ${TILE_W - 1});
+      }
+      void main() {
+        // セル順に処理する (GPU がまとめて実行する近くの画素 = 近くの粒子 → 読む範囲・ループ長がそろって速い)。
+        // 結果もセル順に書き、あとで scatter パスが粒子番号の位置へ戻す
+        int s = tileIndex(ivec2(gl_FragCoord.xy));
+        if (s >= uN) { o = vec4(0.0); oWork = vec4(0.0); return; }
+        vec4 me = texelFetch(uSorted, at(s, uW), 0);
+        vec4 st = vec4(me.xy, texelFetch(uState, at(int(me.w), uW), 0).zw);
+        int ta = int(me.z + 0.5);                        // 自分の色 (行列の行)
+        float BETA = uBeta, INV_BETA = 1.0 / uBeta, INV_OMB = 1.0 / (1.0 - uBeta);
+        float rMax2 = uRMax * uRMax, invRMax = 1.0 / uRMax;
+        float reach = uRMax + 1e-3 + max(uWorld.x, uWorld.y) * 2e-7;   // 境界の丸め誤差ぶん少し広めに
+        vec2 f = vec2(0.0);
+        int cand = 0;
+        int rowLo =int(floor((st.y - reach) / uCell.y)), rowHi = int(floor((st.y + reach) / uCell.y));
+        for (int j = rowLo; j <= rowHi; j++) {
+          // この行の帯までの縦の距離 → 円の弦の半分の長さ
+          float gap = max(0.0, max(float(j) * uCell.y - st.y, st.y - float(j + 1) * uCell.y));
+          if (gap >= reach) continue;
+          float chord = sqrt(reach * reach - gap * gap);
+          int ny = j; float offY = 0.0;
+          if (ny < 0) { ny += uRows; offY = -uWorld.y; } else if (ny >= uRows) { ny -= uRows; offY = uWorld.y; }
+          int ca = int(floor((st.x - chord) / uCell.x)), cb = int(floor((st.x + chord) / uCell.x));
+          // 列の範囲 [ca, cb] を画面の端で最大2区間に分ける (行の中はセル順 = 連続した区間)
+          for (int seg = 0; seg < 2; seg++) {
+            int a0, a1; float offX = 0.0;
+            if (seg == 0) { a0 = max(ca, 0); a1 = min(cb, uCols - 1); }
+            else if (ca < 0) { a0 = ca + uCols; a1 = uCols - 1; offX = -uWorld.x; }
+            else if (cb >= uCols) { a0 = 0; a1 = cb - uCols; offX = uWorld.x; }
+            else break;
+            if (a0 > a1) continue;
+            vec2 pa = st.xy - vec2(offX, offY);
+            // 色ごとに: この行・この色のセル [a0, a1] は連続した1区間。係数は区間ごとに1回
+            for (int tb = 0; tb < uNT; tb++) {
+              int base = (ny * uNT + tb) * uCols;
+              int s0 = int(texelFetch(uCells, at(base + a0, uW), 0).x);
+              int s1 = int(texelFetch(uCells, at(base + a1 + 1, uW), 0).x);
+              cand += s1 - s0 + 4;                       // + 区間ごとの準備の手間
+              if (s0 >= s1) continue;
+              float m = texelFetch(uMat, ivec2(tb, ta), 0).x;
+              // 位置は2粒子ずつ1画素。4個 (2画素) ずつ先に読んでから順に足す (足す順番は1個ずつと同じ)
+              int s = s0;
+              if ((s & 1) == 1) { vec2 b0 = texelFetch(uSPos, at(s >> 1, uW), 0).zw; ${ACC('b0')} s++; }
+              for (; s + 3 < s1; s += 4) {
+                vec4 p01 = texelFetch(uSPos, at(s >> 1, uW), 0), p23 = texelFetch(uSPos, at((s >> 1) + 1, uW), 0);
+                ${ACC('p01.xy')} ${ACC('p01.zw')} ${ACC('p23.xy')} ${ACC('p23.zw')}
+              }
+              for (; s < s1; s += 2) {
+                vec4 p01 = texelFetch(uSPos, at(s >> 1, uW), 0);
+                ${ACC('p01.xy')}
+                if (s + 1 < s1) ${ACC('p01.zw')}
+              }
+            }
+          }
+        }
+        vec2 v = st.zw * uFriction + f * uAccScale;
+        if (uInput.z > 0.5) {                            // 「破壊」
+          vec2 d = st.xy - uInput.xy;
+          vec2 hw = uWorld * 0.5;
+          if (d.x > hw.x) d.x -= uWorld.x; else if (d.x < -hw.x) d.x += uWorld.x;
+          if (d.y > hw.y) d.y -= uWorld.y; else if (d.y < -hw.y) d.y += uWorld.y;
+          float d2 = dot(d, d);
+          float PR = uPR;
+          if (d2 < PR * PR && d2 > 1e-6) {
+            float dist = sqrt(d2);
+            v += d * ((1.0 - dist / PR) * uPF * uDt / dist);
+          }
+        }
+        vec2 p = st.xy + v * uDt;
+        p.x = wrapAxis(p.x, uWorld.x);
+        p.y = wrapAxis(p.y, uWorld.y);
+        o = vec4(p, v);
+        oWork = vec4(float(cand), 0.0, 0.0, 0.0);
+      }`, ['uState', 'uSorted', 'uSPos', 'uCells', 'uW', 'uN', 'uNT', 'uWorld', 'uRMax', 'uFriction',
+           'uAccScale', 'uDt', 'uMat', 'uInput', 'uCell', 'uCols', 'uRows', 'uBeta', 'uPR', 'uPF']);
+
+    // セル順の結果 → 粒子番号の位置へ書き戻す (1画素の点を n 個描く。各粒子ちょうど1回書かれる)
+    const scatterP = (() => {
+      const p = r.program(`#version 300 es
+        precision highp float; precision highp int; precision highp sampler2D;
+        uniform sampler2D uResult, uSorted; uniform int uRows;
+        flat out vec4 vVal;
+        void main() {
+          int s = gl_VertexID, t = s >> ${TILE_LOG_W + TILE_LOG_H}, w = s & ${TILE_W * TILE_H - 1};
+          vVal = texelFetch(uResult, ivec2(((t & ${TEXW / TILE_W - 1}) << ${TILE_LOG_W}) + (w & ${TILE_W - 1}),
+                                           ((t >> ${Math.log2(TEXW / TILE_W)}) << ${TILE_LOG_H}) + (w >> ${TILE_LOG_W})), 0);
+          int i = int(texelFetch(uSorted, ivec2(s & 1023, s >> 10), 0).w);
+          gl_Position = vec4((float(i & 1023) + 0.5) * (2.0 / 1024.0) - 1.0,
+                             (float(i >> 10) + 0.5) * 2.0 / float(uRows) - 1.0, 0.0, 1.0);
+          gl_PointSize = 1.0;
+        }`, `#version 300 es
+        precision highp float;
+        flat in vec4 vVal;
+        out vec4 o;
+        void main() { o = vVal; }`, []);
+      const u = {};
+      for (const n of ['uResult', 'uSorted', 'uRows']) u[n] = gl.getUniformLocation(p, n);
+      return { p, u };
+    })();
+
+    // 仕事量: 各行の WORK_CHUNK 画素ずつの合計 (1 画素に 4 区画分)
+    const workSumP = prog(`
+      uniform sampler2D uWork;
+      void main() {
+        ivec2 p = ivec2(gl_FragCoord.xy);
+        vec4 r = vec4(0.0);
+        for (int c = 0; c < 4; c++) {
+          int x0 = (p.x * 4 + c) * ${WORK_CHUNK};
+          float sum = 0.0;
+          for (int x = 0; x < ${WORK_CHUNK}; x++) sum += texelFetch(uWork, ivec2(x0 + x, p.y), 0).x;
+          r[c] = sum;
+        }
+        o = r;
+      }`, ['uWork']);
+
+    // 画面サイズ変更: 位置を拡大縮小 (CPU 版の resize と同じ式)
+    const scaleP = prog(`
+      uniform sampler2D uState; uniform int uW, uN; uniform vec2 uScale, uWorld;
+      void main() {
+        int i = here(uW);
+        vec4 st = texelFetch(uState, at(i, uW), 0);
+        o = i < uN ? vec4(min(st.xy * uScale, uWorld - 1e-3), st.zw) : st;
+      }`, ['uState', 'uW', 'uN', 'uScale', 'uWorld']);
+
+    let cur = 0;                 // 現在の状態テクスチャ
+    let active = false;
+    let enterCount = 0;
+    const io = new Float32Array(TEXW * stateRows * 4);
+    const typeIo = new Float32Array(TEXW * stateRows);
+    const rowsFor = (n) => Math.ceil(n / TEXW);
+
+    // 仕事量の実測 (非同期の読み戻し)。work: 各行 × 区画の候補数。key が今の状態と同じときだけ使う
+    let workReq = null;          // 読み戻し待ち { sync, key, rows }
+    let work = null;             // 最新の実測 { key, rows, data, total }
+    let stepNo = 0;
+    let drawInfo = null;         // 直前のステップの分割 (確認用)
+    const workKey = (n) => n + ':' + gCols + 'x' + gRows + 'x' + gTypes;
+    function pollWork() {
+      if (!workReq || gl.getSyncParameter(workReq.sync, gl.SYNC_STATUS) !== gl.SIGNALED) return;
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, workPbo);
+      gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, workIo, 0, CHUNKS * workReq.rows);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      gl.deleteSync(workReq.sync);
+      let total = 0;
+      for (let i = 0; i < CHUNKS * workReq.rows; i++) total += workIo[i];
+      work = { key: workReq.key, rows: workReq.rows, data: workIo.slice(0, CHUNKS * workReq.rows), total };
+      workReq = null;
+    }
+    /** 実測の仕事量から、1回あたりほぼ budget になるよう力のパスの描画範囲を区切る */
+    function planByWork(w, budget) {
+      const rects = [], cw = new Float64Array(CHUNKS);
+      let cur = null;
+      for (let y = 0; y < w.rows; y += TILE_H) {
+        let bw = 0;
+        cw.fill(0);
+        for (let r = y; r < y + TILE_H; r++) for (let c = 0; c < CHUNKS; c++) cw[c] += w.data[r * CHUNKS + c];
+        for (let c = 0; c < CHUNKS; c++) bw += cw[c];
+        if (cur && cur.w === TEXW && cur.work + bw <= budget) { cur.h += TILE_H; cur.work += bw; continue; }
+        if (bw <= budget) { cur = { x: 0, y, w: TEXW, h: TILE_H, work: bw }; rects.push(cur); continue; }
+        cur = null;                                // 1帯でも重い: 区画ごとに横へ分ける
+        let x0 = 0, acc = 0;
+        for (let c = 0; c < CHUNKS; c++) {
+          const cx = c * WORK_CHUNK;
+          if (cw[c] > budget) {                    // 1区画でも重い: タイル幅まで細かく
+            if (cx > x0) rects.push({ x: x0, y, w: cx - x0, h: TILE_H, work: acc });
+            let k = 2; while (k < WORK_CHUNK / TILE_W && cw[c] / k > budget) k *= 2;
+            const pw = WORK_CHUNK / k;
+            for (let i = 0; i < k; i++) rects.push({ x: cx + i * pw, y, w: pw, h: TILE_H, work: cw[c] / k });
+            x0 = cx + WORK_CHUNK; acc = 0;
+            continue;
+          }
+          if (cx > x0 && acc + cw[c] > budget) { rects.push({ x: x0, y, w: cx - x0, h: TILE_H, work: acc }); x0 = cx; acc = 0; }
+          acc += cw[c];
+        }
+        if (x0 < TEXW) rects.push({ x: x0, y, w: TEXW - x0, h: TILE_H, work: acc });
+      }
+      return rects;
+    }
+
+    function bindTex(unit, t) { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t); }
+    function bindQuad() {
+      gl.bindBuffer(gl.ARRAY_BUFFER, r.quadBuf);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      gl.disableVertexAttribArray(1);
+      gl.disableVertexAttribArray(2);
+    }
+    /** 描画用の状態に戻す */
+    function restoreDrawState() {
+      for (let t = 4; t >= 0; t--) bindTex(t, null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.enable(gl.BLEND);
+    }
+    function pass(p, target, rows) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, target.fb);
+      gl.viewport(0, 0, TEXW, rows);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+
+    const sim = {
+      get active() { return active; },
+      get enterCount() { return enterCount; },
+      get stateTexture() { return state[cur].t; },
+      get drawInfo() { return drawInfo; },
+      texW: TEXW,
+      /** 今の粒子数とグリッドで GPU 計算できるか */
+      fits() { return gpuGrid(); },
+      /** CPU 側の配列 → GPU */
+      upload() {
+        const n = params.count, rows = rowsFor(n);
+        for (let i = 0; i < n; i++) {
+          io[i * 4] = posX[i]; io[i * 4 + 1] = posY[i]; io[i * 4 + 2] = velX[i]; io[i * 4 + 3] = velY[i];
+          typeIo[i] = type[i];
+        }
+        gl.bindTexture(gl.TEXTURE_2D, state[cur].t);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TEXW, rows, gl.RGBA, gl.FLOAT, io, 0);
+        gl.bindTexture(gl.TEXTURE_2D, types.t);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TEXW, rows, gl.RED, gl.FLOAT, typeIo, 0);
+        work = null;                             // 前の状態の仕事量の実測は使わない
+        if (workReq) workReq.key = '';
+        simVersion++;
+      },
+      /** GPU → CPU 側の配列 */
+      download() {
+        if (gl.isContextLost()) return;          // 読めない (古い io を配列に写さない)。復帰時はページを読み込み直す
+        const n = params.count, rows = rowsFor(n);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, state[cur].fb);
+        gl.readPixels(0, 0, TEXW, rows, gl.RGBA, gl.FLOAT, io, 0);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        for (let i = 0; i < n; i++) {
+          posX[i] = io[i * 4]; posY[i] = io[i * 4 + 1]; velX[i] = io[i * 4 + 2]; velY[i] = io[i * 4 + 3];
+        }
+        simVersion++;
+      },
+      /** 粒子 [from, to) だけを CPU 側の配列から GPU に送る (粒子数を増やしたとき) */
+      uploadRange(from, to) {
+        for (let i = from; i < to; i++) {
+          io[i * 4] = posX[i]; io[i * 4 + 1] = posY[i]; io[i * 4 + 2] = velX[i]; io[i * 4 + 3] = velY[i];
+          typeIo[i] = type[i];
+        }
+        const r0 = Math.floor(from / TEXW), x0 = from - r0 * TEXW, r1 = rowsFor(to);
+        const put = (t, fmt, data, ch) => {
+          gl.bindTexture(gl.TEXTURE_2D, t);
+          if (x0 > 0) {   // 途中から始まる最初の行
+            gl.texSubImage2D(gl.TEXTURE_2D, 0, x0, r0, TEXW - x0, 1, fmt, gl.FLOAT, data, (r0 * TEXW + x0) * ch);
+          }
+          const rs = x0 > 0 ? r0 + 1 : r0;
+          if (r1 > rs) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, rs, TEXW, r1 - rs, fmt, gl.FLOAT, data, rs * TEXW * ch);
+        };
+        put(state[cur].t, gl.RGBA, io, 4);
+        put(types.t, gl.RED, typeIo, 1);
+        simVersion++;
+      },
+      rescale(sx, sy) {
+        const n = params.count, rows = rowsFor(n);
+        gl.disable(gl.BLEND);
+        bindQuad();
+        gl.useProgram(scaleP.p);
+        bindTex(0, state[cur].t);
+        gl.uniform1i(scaleP.u.uState, 0); gl.uniform1i(scaleP.u.uW, TEXW); gl.uniform1i(scaleP.u.uN, n);
+        gl.uniform2f(scaleP.u.uScale, sx, sy); gl.uniform2f(scaleP.u.uWorld, worldW, worldH);
+        pass(scaleP, state[1 - cur], rows);
+        cur = 1 - cur;
+        restoreDrawState();
+        simVersion++;
+      },
+      /** 実際のフレーム間隔 [ms] から、力のパスの分割数を調整する */
+      noteFrameMs(ms) {
+        // 1フレームをほぼ力のパスとみなし、1回あたり TARGET_DRAW_MS 以下になる分割数にする
+        // (分割数 = フレーム時間 / 目標。前回の分割数を掛けると「分けるほど遅くなる」暴走になる)
+        if (ms > 4 * TARGET_DRAW_MS) drawsHint = Math.min(MAX_DRAWS, Math.max(drawsHint, Math.ceil(ms / TARGET_DRAW_MS)));
+        else if (ms < 40 && drawsHint > 1) drawsHint = Math.max(1, Math.floor(drawsHint * 0.9));
+      },
+      enter() { if (active || !sim.fits()) return; sim.upload(); active = true; enterCount = params.count; },
+      exit()  { if (!active) return; sim.download(); active = false; },
+      step(dt, friction, accScale) {
+        if (!sim.fits()) { sim.exit(); return; }
+        const n = params.count;
+        let npad = 1024; while (npad < n) npad *= 2;
+        const rows = rowsFor(n), nCells = gCols * gRows * gTypes;   // 区間 (行, 色, 列) の数
+
+        gl.disable(gl.BLEND);
+        bindQuad();
+
+        // 1) keys
+        gl.useProgram(keyP.p);
+        bindTex(0, state[cur].t); bindTex(1, types.t);
+        gl.uniform1i(keyP.u.uState, 0); gl.uniform1i(keyP.u.uType, 1); gl.uniform1i(keyP.u.uN, n); gl.uniform1i(keyP.u.uW, TEXW);
+        gl.uniform1i(keyP.u.uNT, gTypes);
+        gl.uniform2f(keyP.u.uCell, gCellW, gCellH); gl.uniform1i(keyP.u.uCols, gCols); gl.uniform1i(keyP.u.uRows, gRows);
+        pass(keyP, keys[0], rows);
+
+        // 2) bitonic sort (段 k = 2 .. npad。間隔 SORT_LOCAL/2 以下はまとめて1パス)
+        let src = 0;
+        const sortPass = (p) => { bindTex(0, keys[src].t); pass(p, keys[1 - src], rows); src = 1 - src; };
+        gl.useProgram(sortLocalP.p);
+        gl.uniform1i(sortLocalP.u.uKeys, 0); gl.uniform1i(sortLocalP.u.uW, TEXW); gl.uniform1i(sortLocalP.u.uN, n);
+        gl.uniform1i(sortLocalP.u.uLocal, 1);
+        sortPass(sortLocalP);                                    // 段 k <= SORT_LOCAL
+        for (let k = SORT_LOCAL * 2; k <= npad; k <<= 1) {
+          gl.useProgram(sortP.p);
+          gl.uniform1i(sortP.u.uKeys, 0); gl.uniform1i(sortP.u.uW, TEXW); gl.uniform1i(sortP.u.uN, n);
+          gl.uniform1i(sortP.u.uFlip, 1); gl.uniform1i(sortP.u.uJ, k >> 1);
+          sortPass(sortP);                                       // 折り返して比べる
+          gl.uniform1i(sortP.u.uFlip, 0);
+          for (let j = k >> 2; j >= SORT_LOCAL; j >>= 1) { gl.uniform1i(sortP.u.uJ, j); sortPass(sortP); }
+          gl.useProgram(sortLocalP.p);
+          gl.uniform1i(sortLocalP.u.uLocal, 0);
+          sortPass(sortLocalP);                                  // 間隔 SORT_LOCAL/2 .. 1
+        }
+
+        // 3) cell starts
+        gl.useProgram(cellP.p);
+        bindTex(0, keys[src].t);
+        gl.uniform1i(cellP.u.uKeys, 0); gl.uniform1i(cellP.u.uW, TEXW);
+        gl.uniform1i(cellP.u.uN, n); gl.uniform1i(cellP.u.uCells, nCells);
+        pass(cellP, cells, Math.ceil((nCells + 1) / TEXW));
+
+        // 4) gather
+        gl.useProgram(gatherP.p);
+        bindTex(0, keys[src].t); bindTex(1, state[cur].t); bindTex(2, types.t);
+        gl.uniform1i(gatherP.u.uKeys, 0); gl.uniform1i(gatherP.u.uState, 1); gl.uniform1i(gatherP.u.uType, 2);
+        gl.uniform1i(gatherP.u.uW, TEXW); gl.uniform1i(gatherP.u.uN, n);
+        pass(gatherP, sorted, rows);
+        gl.useProgram(packP.p);
+        bindTex(0, sorted.t);
+        gl.uniform1i(packP.u.uSorted, 0); gl.uniform1i(packP.u.uW, TEXW);
+        pass(packP, spos, rowsFor(Math.ceil(n / 2)));
+
+        // 5) forces + integrate (セル順で計算し result へ)
+        gl.useProgram(stepP.p);
+        for (let a = 0; a < numTypes; a++) for (let b = 0; b < numTypes; b++) mIo[a * MAX_TYPES + b] = matrix[a * numTypes + b];
+        bindTex(1, mtex.t);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, MAX_TYPES, MAX_TYPES, gl.RED, gl.FLOAT, mIo);
+        bindTex(0, state[cur].t); bindTex(2, sorted.t); bindTex(3, cells.t); bindTex(4, spos.t);
+        const u = stepP.u;
+        gl.uniform1i(u.uState, 0); gl.uniform1i(u.uMat, 1); gl.uniform1i(u.uSorted, 2); gl.uniform1i(u.uCells, 3);
+        gl.uniform1i(u.uSPos, 4);
+        gl.uniform1i(u.uW, TEXW); gl.uniform1i(u.uN, n); gl.uniform1i(u.uNT, gTypes);
+        gl.uniform2f(u.uWorld, worldW, worldH);
+        gl.uniform2f(u.uCell, gCellW, gCellH); gl.uniform1i(u.uCols, gCols); gl.uniform1i(u.uRows, gRows);
+        gl.uniform1f(u.uRMax, params.rMax); gl.uniform1f(u.uFriction, friction);
+        gl.uniform1f(u.uAccScale, accScale); gl.uniform1f(u.uDt, dt);
+        gl.uniform3f(u.uInput, input.x, input.y, input.active ? 1 : 0);
+        gl.uniform1f(u.uBeta, params.beta);
+        gl.uniform1f(u.uPR, params.pointerRadius); gl.uniform1f(u.uPF, params.pointerForce);
+        // 粒子が非常に多いときは描画命令を分けて、1回が長くなりすぎないようにする
+        pollWork();
+        const fRows = Math.ceil(rows / TILE_H) * TILE_H, bands = fRows / TILE_H;   // タイル単位で分ける
+        const key = workKey(n);
+        let rects;
+        const measured = !!work && work.key === key && work.rows === fRows;
+        if (measured) {
+          // 実測あり: 1回の仕事量がそろうように区切る (凝集した所は細かく)
+          const draws = Math.min(MAX_DRAWS, Math.max(drawsHint, Math.ceil(work.total / WORK_PER_DRAW)));
+          rects = draws <= 1 ? [{ x: 0, y: 0, w: TEXW, h: fRows, work: work.total }] : planByWork(work, work.total / draws);
+        } else {
+          // 実測なし: 一様分布の見積もり × 凝集の分で、均等に区切る
+          const est = CLUSTER_FACTOR * n * n * 4.2 * params.rMax * params.rMax / (worldW * worldH);
+          const draws = Math.min(MAX_DRAWS, Math.max(drawsHint, Math.ceil(est / WORK_PER_DRAW)));
+          rects = [];
+          if (draws <= bands) {
+            const chunk = Math.ceil(bands / draws) * TILE_H;
+            for (let y0 = 0; y0 < fRows; y0 += chunk) rects.push({ x: 0, y: y0, w: TEXW, h: Math.min(chunk, fRows - y0) });
+          } else {
+            let w = TEXW; while (w > 16 && bands * (TEXW / w) < draws) w >>= 1;   // タイルの帯をさらに横に分ける
+            for (let y0 = 0; y0 < fRows; y0 += TILE_H) for (let x0 = 0; x0 < TEXW; x0 += w) rects.push({ x: x0, y: y0, w, h: TILE_H });
+          }
+          for (const rc of rects) rc.work = est / rects.length;
+        }
+        drawInfo = { draws: rects.length, measured, work: measured ? work.total : 0, maxDrawWork: Math.max(...rects.map((rc) => rc.work)) };
+        // gl.flush (GPU への送信) は1回ごとの負担が大きいので、FLUSH_WORK ぶんの仕事ごとにだけ送る
+        // (実測で遅いと分かっているときは描画命令 FLUSH_EVERY_SLOW 回ごと)
+        gl.bindFramebuffer(gl.FRAMEBUFFER, forceFb || result.fb);
+        let sinceFlush = 0;
+        for (let i = 0; i < rects.length; i++) {
+          const rc = rects[i];
+          gl.viewport(rc.x, rc.y, rc.w, rc.h);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          sinceFlush += rc.work;
+          if (i < rects.length - 1 && (drawsHint > 1 ? (i + 1) % FLUSH_EVERY_SLOW === 0 : sinceFlush >= FLUSH_WORK)) {
+            gl.flush(); sinceFlush = 0;
+          }
+        }
+
+        // 仕事量を測る (数ステップおき。結果は次のフレーム以降に、待たずに受け取る)
+        if (forceFb && !workReq && ++stepNo % MEASURE_EVERY === 0) {
+          gl.useProgram(workSumP.p);
+          bindTex(0, workTex.t); gl.uniform1i(workSumP.u.uWork, 0);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, workSum.fb);
+          gl.viewport(0, 0, CHUNKS / 4, fRows);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          gl.bindBuffer(gl.PIXEL_PACK_BUFFER, workPbo);
+          gl.bufferData(gl.PIXEL_PACK_BUFFER, CHUNKS * fRows * 4, gl.STREAM_READ);   // 読む分ちょうど (全体を読み戻す)
+          gl.readPixels(0, 0, CHUNKS / 4, fRows, gl.RGBA, gl.FLOAT, 0);
+          gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+          workReq = { sync: gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0), key, rows: fRows };
+        }
+
+        // 6) scatter: result (セル順) → 次の状態 (粒子番号順)
+        gl.useProgram(scatterP.p);
+        bindTex(0, result.t); bindTex(1, sorted.t);
+        gl.uniform1i(scatterP.u.uResult, 0); gl.uniform1i(scatterP.u.uSorted, 1); gl.uniform1i(scatterP.u.uRows, rows);
+        gl.disableVertexAttribArray(0);                          // 頂点属性は使わない (gl_VertexID だけ)
+        gl.bindFramebuffer(gl.FRAMEBUFFER, state[1 - cur].fb);
+        gl.viewport(0, 0, TEXW, rows);
+        gl.drawArrays(gl.POINTS, 0, n);
+
+        cur = 1 - cur;
+        restoreDrawState();
+      },
+    };
+    return sim;
+  }
+
+  // 実体は初めて GPU 計算に切り替えるときに作る (テクスチャ約 70MB とシェーダのコンパイル)
+  let impl = null, broken = false;
+  return {
+    texW: TEXW,
+    get active() { return !!impl && impl.active; },
+    get enterCount() { return impl ? impl.enterCount : 0; },
+    get stateTexture() { return impl.stateTexture; },
+    get drawInfo() { return impl ? impl.drawInfo : null; },
+    fits() { return !broken && gpuGrid(); },
+    enter() {
+      if (broken) return;
+      if (!impl) {
+        try { impl = build(); }
+        catch (e) { console.warn('GPU 計算の初期化失敗 (CPU で計算します):', e); broken = true; return; }
+      }
+      impl.enter();
+    },
+    exit() { if (impl) impl.exit(); },
+    download() { if (impl) impl.download(); },
+    uploadRange(from, to) { impl.uploadRange(from, to); },
+    rescale(sx, sy) { impl.rescale(sx, sy); },
+    noteFrameMs(ms) { if (impl && impl.active) impl.noteFrameMs(ms); },
+    step(dt, friction, accScale) {
+      if (!gpuGrid()) {   // 画面が巨大すぎてセル表に収まらない (実質起きない)。CPU に戻し、粒子数も CPU の上限へ
+        impl.exit(); refreshEngineLabel();
+        if (params.count > MAX_COUNT_CPU) { setParticleCount(MAX_COUNT_CPU); refreshLabels(); }
+        return;
+      }
+      impl.step(dt, friction, accScale);
+    },
+  };
+}
+
 function createCanvas2DRenderer() {
   const ctx = canvas.getContext('2d', { alpha: false });
   const styles = [];
-  for (let t = 0; t < NUM_TYPES; t++) {
-    const r = TYPE_COLORS[t * 3] * 255 | 0, g = TYPE_COLORS[t * 3 + 1] * 255 | 0, b = TYPE_COLORS[t * 3 + 2] * 255 | 0;
-    styles.push(`rgba(${r},${g},${b},${POINT_ALPHA})`);
+  function applyStyle() {
+    styles.length = 0;
+    for (let t = 0; t < numTypes; t++) {
+      const r = TYPE_COLORS[t * 3] * 255 | 0, g = TYPE_COLORS[t * 3 + 1] * 255 | 0, b = TYPE_COLORS[t * 3 + 2] * 255 | 0;
+      styles.push(`rgba(${r},${g},${b},${params.pointAlpha})`);
+    }
   }
-  const fadeStyle = `rgba(0,0,0,${TRAIL_FADE})`;
-  const s = POINT_SIZE * 0.5, hs = s / 2;
+  applyStyle();
   let w = 1, h = 1;
   return {
     name: 'Canvas2D',
+    applyStyle,
     resize(newW, newH, dpr) {
       w = newW; h = newH;
       canvas.width = Math.round(w * dpr);
@@ -538,12 +1646,13 @@ function createCanvas2DRenderer() {
     },
     onCountChanged() {},
     draw(n) {
+      const s = params.pointSize * 0.5, hs = s / 2;
       ctx.globalCompositeOperation = 'source-over';
-      ctx.fillStyle = fadeStyle;
+      ctx.fillStyle = `rgba(0,0,0,${params.trailFade})`;
       ctx.fillRect(0, 0, w, h);
       ctx.globalCompositeOperation = 'lighter';
       // fillStyle の切り替えを減らすためタイプごとにまとめて描く
-      for (let t = 0; t < NUM_TYPES; t++) {
+      for (let t = 0; t < numTypes; t++) {
         ctx.fillStyle = styles[t];
         for (let i = 0; i < n; i++) {
           if (type[i] === t) ctx.fillRect(posX[i] - hs, posY[i] - hs, s, s);
@@ -556,6 +1665,9 @@ function createCanvas2DRenderer() {
 let renderer = null;
 try { renderer = createWebGLRenderer(); } catch (e) { console.warn('WebGL 初期化失敗:', e); renderer = null; }
 if (!renderer) renderer = createCanvas2DRenderer();
+if (renderer.isGL2) {
+  try { gpu = createGpuSim(renderer); } catch (e) { console.warn('GPU 計算の初期化失敗 (CPU で計算します):', e); gpu = null; }
+}
 
 /* =====================================================================
  *  UI
@@ -564,62 +1676,250 @@ const $ = (id) => document.getElementById(id);
 const ui = {
   panel: $('panel'), count: $('count'), countVal: $('countVal'),
   rmax: $('rmax'), rmaxVal: $('rmaxVal'), friction: $('friction'), frictionVal: $('frictionVal'),
-  fps: $('fps'), notice: $('notice'), matrix: $('matrix'), ring: $('ring'),
+  types: $('types'), typesVal: $('typesVal'),
+  fps: $('fps'), notice: $('notice'), matrix: $('matrix'), matrixInfo: $('matrixInfo'), ring: $('ring'),
   btnPause: $('btnPause'),
 };
 
 function setupSlider(el, min, max, stepSize, value) {
   el.min = min; el.max = max; el.step = stepSize; el.value = value;
 }
-setupSlider(ui.count, MIN_COUNT, MAX_COUNT, 100, DEFAULT_COUNT);
+// 粒子数スライダーは対数目盛 (少ない側も多い側も同じ感覚で動かせるように)
+const COUNT_STEPS = 1000;
+const countFromSlider = (v) => {
+  const c = MIN_COUNT * Math.pow(maxCount() / MIN_COUNT, v / COUNT_STEPS);
+  const unit = c < 10000 ? 100 : 1000;
+  return Math.round(c / unit) * unit;
+};
+const sliderFromCount = (c) => Math.round(Math.log(c / MIN_COUNT) / Math.log(maxCount() / MIN_COUNT) * COUNT_STEPS);
+setupSlider(ui.count, 0, COUNT_STEPS, 1, sliderFromCount(DEFAULT_COUNT));
 setupSlider(ui.rmax, MIN_RMAX, MAX_RMAX, 1, DEFAULT_RMAX);
 setupSlider(ui.friction, MIN_HALF_LIFE, MAX_HALF_LIFE, 0.005, DEFAULT_HALF_LIFE);
+setupSlider(ui.types, 1, MAX_TYPES, 1, DEFAULT_TYPES);
 
 function refreshLabels() {
-  ui.count.value = params.count;
+  ui.count.value = sliderFromCount(params.count);
   ui.countVal.textContent = params.count;
   ui.rmaxVal.textContent = Math.round(params.rMax) + ' px';
   ui.frictionVal.textContent = params.halfLife.toFixed(3) + ' 秒';
+  ui.types.value = numTypes;
+  ui.typesVal.textContent = numTypes;
   ui.btnPause.textContent = params.paused ? '再開' : '一時停止';
 }
 
-ui.count.addEventListener('input', () => { setParticleCount(+ui.count.value); refreshLabels(); });
+ui.count.addEventListener('input', () => {
+  setParticleCount(countFromSlider(+ui.count.value));
+  ui.countVal.textContent = params.count;   // つまみは触っている位置のまま
+});
 ui.rmax.addEventListener('input', () => { params.rMaxSetting = +ui.rmax.value; rebuildGrid(); refreshLabels(); });
 ui.friction.addEventListener('input', () => { params.halfLife = +ui.friction.value; refreshLabels(); });
 
-// 行列の可視化: 先頭行・先頭列はタイプの色。正 = 緑 (引き合う), 負 = 赤 (反発)
+// 行列: 先頭行・先頭列はタイプの色。行 = 動く側, 列 = 相手。正 = 緑 (引き寄せられる), 負 = 赤 (離れる)
+// セルを上下にドラッグ (上 = 引き寄せる / 下 = 離れる)、ホイールで微調整、ダブルクリックで 0
 const matrixCells = [];
-(function buildMatrixGrid() {
-  const css = (t) => `rgb(${TYPE_COLORS[t*3]*255|0},${TYPE_COLORS[t*3+1]*255|0},${TYPE_COLORS[t*3+2]*255|0})`;
+const typeCss = (t) => `rgb(${TYPE_COLORS[t*3]*255|0},${TYPE_COLORS[t*3+1]*255|0},${TYPE_COLORS[t*3+2]*255|0})`;
+const MATRIX_DRAG_PX = 90;          // 何 px ドラッグで係数が 1 変わるか
+let matrixHover = -1, matrixDrag = null;
+
+function buildMatrixGrid() {
+  ui.matrix.textContent = '';
+  matrixCells.length = 0;
+  matrixHover = -1; matrixDrag = null;
+  ui.matrix.classList.remove('editing');
+  ui.matrix.style.gridTemplateColumns = `repeat(${numTypes + 1}, 1fr)`;
   ui.matrix.appendChild(document.createElement('div')); // 左上の空白
-  for (let j = 0; j < NUM_TYPES; j++) {
-    const d = document.createElement('div'); d.className = 'head'; d.style.background = css(j);
+  for (let j = 0; j < numTypes; j++) {
+    const d = document.createElement('div'); d.className = 'head'; d.style.background = typeCss(j);
     ui.matrix.appendChild(d);
   }
-  for (let i = 0; i < NUM_TYPES; i++) {
-    const h = document.createElement('div'); h.className = 'head'; h.style.background = css(i);
+  for (let i = 0; i < numTypes; i++) {
+    const h = document.createElement('div'); h.className = 'head'; h.style.background = typeCss(i);
     ui.matrix.appendChild(h);
-    for (let j = 0; j < NUM_TYPES; j++) {
+    for (let j = 0; j < numTypes; j++) {
       const d = document.createElement('div');
+      const k = i * numTypes + j;
+      d.className = 'cell';
+      d.addEventListener('pointerenter', () => { matrixHover = k; refreshMatrixInfo(); });
+      d.addEventListener('pointerleave', () => { if (matrixHover === k) matrixHover = -1; refreshMatrixInfo(); });
+      d.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        d.setPointerCapture(e.pointerId);
+        matrixDrag = { k, y0: e.clientY, v0: matrix[k] };
+        setMatrixValue(k, matrix[k]);          // 補間中ならここで止める
+        d.classList.add('active'); ui.matrix.classList.add('editing');
+        refreshMatrixView();
+      });
+      d.addEventListener('pointermove', (e) => {
+        if (!matrixDrag || matrixDrag.k !== k) return;
+        const v = matrixDrag.v0 + (matrixDrag.y0 - e.clientY) / MATRIX_DRAG_PX;
+        setMatrixValue(k, Math.round(v * 100) / 100);
+        refreshMatrixView();
+      });
+      const end = () => {
+        if (!matrixDrag || matrixDrag.k !== k) return;
+        matrixDrag = null;
+        d.classList.remove('active'); ui.matrix.classList.remove('editing');
+        refreshMatrixView();
+      };
+      d.addEventListener('pointerup', end);
+      d.addEventListener('pointercancel', end);
+      d.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        setMatrixValue(k, Math.round((matrix[k] - Math.sign(e.deltaY) * 0.05) * 100) / 100);
+        refreshMatrixView();
+      }, { passive: false });
+      d.addEventListener('dblclick', () => { setMatrixValue(k, 0); refreshMatrixView(); });
       ui.matrix.appendChild(d); matrixCells.push(d);
     }
   }
-  ui.matrix.title = '引力行列 (行 = 受ける側, 列 = 相手) 緑: 引力 / 赤: 斥力';
-})();
+}
+buildMatrixGrid();
 
 function refreshMatrixView() {
   for (let k = 0; k < matrixCells.length; k++) {
     const v = matrix[k], a = Math.abs(v).toFixed(2);
     matrixCells[k].style.background = v >= 0 ? `rgba(90,220,130,${a})` : `rgba(240,80,90,${a})`;
+    // ドラッグ中のセルだけ数値を出す
+    matrixCells[k].textContent = matrixDrag && matrixDrag.k === k ? (v >= 0 ? '+' : '') + v.toFixed(2) : '';
+  }
+  refreshMatrixInfo();
+}
+
+/** 行列の下の説明: 「●は ● に 引き寄せられる +0.42」 */
+function refreshMatrixInfo() {
+  const k = matrixDrag ? matrixDrag.k : matrixHover;
+  if (k < 0) {
+    ui.matrixInfo.innerHTML = '<span class="hint">↑ドラッグ 引き寄せ / ↓ 離れる / ダブルクリック 0</span>';
+    return;
+  }
+  const i = (k / numTypes) | 0, j = k % numTypes, v = matrix[k];
+  const word = Math.abs(v) < 0.05 ? 'を気にしない' : v > 0 ? (v > 0.5 ? 'に強く引き寄せられる' : 'に引き寄せられる')
+                                                          : (v < -0.5 ? 'から強く離れる' : 'から離れる');
+  ui.matrixInfo.innerHTML =
+    `<span class="dot" style="background:${typeCss(i)}"></span>は` +
+    `<span class="dot" style="background:${typeCss(j)}"></span>${word}` +
+    `<span class="val" style="color:${v >= 0 ? '#7d8' : '#f78'}">${v >= 0 ? '+' : ''}${v.toFixed(2)}</span>`;
+}
+
+/* ---- プリセット (どれも params.lerpTime 秒かけて滑らかに移る) ---- */
+const PRESETS = {
+  random: null,                                   // startCreation と同じ
+  self(m) {      // 同じ色どうしで集まり、違う色は少し避ける
+    const N = numTypes;
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) m[i * N + j] = i === j ? 0.8 : -0.3;
+  },
+  chase(m) {     // 各色は次の色を追いかけ、追われる側は逃げる → 色の帯が回り続ける
+    m.fill(0);
+    const N = numTypes;
+    for (let i = 0; i < N; i++) {
+      const next = (i + 1) % N;
+      m[i * N + i] = 0.3;
+      if (next === i) continue;          // 1色だけのとき
+      m[i * N + next] = 0.8;
+      m[next * N + i] = -0.5;
+    }
+  },
+  symmetric(m) { // A→B と B→A を平均してそろえる
+    const N = numTypes;
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+      m[i * N + j] = (matrix[i * N + j] + matrix[j * N + i]) / 2;
+    }
+  },
+  invert(m) { for (let k = 0; k < m.length; k++) m[k] = -matrix[k]; },
+  zero(m) { m.fill(0); },
+};
+$('presets').addEventListener('click', (e) => {
+  const name = e.target.dataset && e.target.dataset.preset;
+  if (!name) return;
+  if (name === 'random') { startCreation(); return; }
+  const target = new Float32Array(numTypes * numTypes);
+  PRESETS[name](target);
+  lerpMatrixTo(target);
+});
+
+/** 色の種類数を変える。今までの色どうしの関係は残し、増えた分はランダム。粒子の色は振り直す */
+function setNumTypes(n) {
+  n = Math.max(1, Math.min(MAX_TYPES, n | 0));
+  if (n === numTypes) return;
+  const old = numTypes, oldM = matrix;
+  numTypes = n;
+  matrix = new Float32Array(n * n);
+  matrixFrom = new Float32Array(n * n);
+  matrixTo = new Float32Array(n * n);
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+    matrix[i * n + j] = i < old && j < old ? oldM[i * old + j] : Math.random() * 2 - 1;
+  }
+  matrixLerpT = 1;
+  computeTypeColors();
+  renderer.applyStyle();
+  // 粒子の色を新しい種類数で均等に振り直す (位置・速度はそのまま)
+  const onGpu = gpu && gpu.active;
+  if (onGpu) gpu.download();
+  for (let i = 0; i < params.count; i++) type[i] = (Math.random() * n) | 0;
+  renderer.onCountChanged(params.count, 0);
+  if (onGpu) gpu.uploadRange(0, params.count);
+  simVersion++; idleFrames = 0;
+  buildMatrixGrid(); refreshMatrixView(); refreshLabels();
+}
+ui.types.addEventListener('input', () => setNumTypes(+ui.types.value));
+
+/* ---- 詳細設定 ---- */
+const ADVANCED = [
+  // key, ラベル, 最小, 最大, 刻み, 表示, 初期値
+  ['timeScale',     '時間の速さ',             0.1,  2,     0.05, (v) => '×' + v.toFixed(2), 1],
+  ['forceFactor',   '力の強さ',               1,    40,    0.5,  (v) => v.toFixed(1), FORCE_FACTOR],
+  ['beta',          '近すぎて反発する距離',   0.05, 0.9,   0.01, (v) => Math.round(v * 100) + '% (rMax 比)', BETA],
+  ['pointSize',     '点の大きさ',             1,    20,    0.5,  (v) => v.toFixed(1) + ' px', POINT_SIZE],
+  ['pointAlpha',    '点の明るさ',             0.05, 1,     0.01, (v) => v.toFixed(2), POINT_ALPHA],
+  ['trailFade',     '残像の消え方',           0.02, 1,     0.01, (v) => v >= 1 ? '残像なし' : v.toFixed(2) + (v < 0.1 ? ' (長い)' : ''), TRAIL_FADE],
+  ['pointerRadius', '「破壊」の半径',         30,   500,   5,    (v) => v + ' px', POINTER_RADIUS],
+  ['pointerForce',  '「破壊」の強さ',         0,    20000, 100,  (v) => String(v), POINTER_FORCE],
+  ['lerpTime',      '関係が切り替わる時間',   0,    5,     0.1,  (v) => v.toFixed(1) + ' 秒', MATRIX_LERP_TIME],
+];
+const advInputs = {};
+(function buildAdvanced() {
+  const rows = $('advRows');
+  for (const [key, label, min, max, stepSize, fmt] of ADVANCED) {
+    const row = document.createElement('div'); row.className = 'row';
+    const lab = document.createElement('label');
+    const name = document.createElement('span'); name.textContent = label;
+    const val = document.createElement('span');
+    lab.append(name, val);
+    const inp = document.createElement('input'); inp.type = 'range';
+    setupSlider(inp, min, max, stepSize, params[key]);
+    inp.addEventListener('input', () => { setAdvanced(key, +inp.value); });
+    row.append(lab, inp); rows.appendChild(row);
+    advInputs[key] = { inp, val, fmt };
+  }
+  refreshAdvanced();
+})();
+function setAdvanced(key, v) {
+  params[key] = v;
+  if (key === 'beta') simVersion++;                          // 力そのものが変わる
+  if (key === 'pointSize' || key === 'pointAlpha') renderer.applyStyle();
+  if (key === 'pointSize' || key === 'pointAlpha' || key === 'trailFade') idleFrames = 0;   // 停止中も描き直す
+  if (key === 'pointerRadius') updateRing();
+  refreshAdvanced();
+}
+function refreshAdvanced() {
+  for (const [key] of ADVANCED) {
+    const a = advInputs[key];
+    a.inp.value = params[key];
+    a.val.textContent = a.fmt(params[key]);
   }
 }
+$('btnResetAdv').addEventListener('click', () => {
+  for (const [key, , , , , , def] of ADVANCED) setAdvanced(key, def);
+});
 
 function togglePause() { params.paused = !params.paused; refreshLabels(); }
 function toggleFullscreen() {
   if (document.fullscreenElement) document.exitFullscreen();
   else document.documentElement.requestFullscreen().catch(() => {});
 }
-function togglePanel() { ui.panel.classList.toggle('hidden'); }
+function togglePanel() { document.body.classList.toggle('panel-hidden'); }
+$('panelClose').addEventListener('click', togglePanel);
+$('panelOpen').addEventListener('click', togglePanel);
 
 $('btnCreate').addEventListener('click', startCreation);
 ui.btnPause.addEventListener('click', togglePause);
@@ -645,7 +1945,7 @@ function showNotice(text) {
 /* ---- ポインタ (マウス / タッチ) → input ---- */
 function updateRing() {
   ui.ring.style.display = input.active ? 'block' : 'none';
-  ui.ring.style.width = ui.ring.style.height = POINTER_RADIUS * 2 + 'px';
+  ui.ring.style.width = ui.ring.style.height = params.pointerRadius * 2 + 'px';
   ui.ring.style.left = input.x + 'px';
   ui.ring.style.top = input.y + 'px';
 }
@@ -671,15 +1971,63 @@ let accumulator = 0;
 let elapsed = 0;
 let fpsFrames = 0, fpsTime = 0, lowFpsTime = 0;
 let simMsSum = 0, simSteps = 0;   // 計算時間の計測 (どこが重いかの切り分け用)
+let stallFrames = 0;              // Worker 待ちでシミュレーションを進めなかったフレーム数
+
+/** CPU の力計算 (Worker 待ちを含む) が重い状態が続いたら GPU 計算に切り替える */
+let heavySteps = 0;
+function cpuHeavy(costMs) {
+  if (!gpu || gpu.active) return;
+  heavySteps = costMs > GPU_ON_MS ? heavySteps + 1 : 0;
+  if (heavySteps >= GPU_ON_STEPS && gpu.fits()) {
+    gpu.enter();
+    heavySteps = 0; lowFpsTime = 0;   // 切り替え前の低 FPS で粒子数を減らさない
+    refreshEngineLabel();
+  }
+}
+/** CPU 版の1ステップで調べるペア数の見積もり */
+function cpuPairEstimate() {
+  const n = params.count;
+  return n * n * 9 * params.rMax * params.rMax / (2 * worldW * worldH);
+}
+/** 粒子数・rMax・画面サイズから、CPU と GPU のどちらで計算するかを決める */
+function updateEngine() {
+  if (!gpu) return;
+  const est = cpuPairEstimate();
+  if (!gpu.active) {
+    if (est > GPU_ON_PAIRS && gpu.fits()) { gpu.enter(); heavySteps = 0; lowFpsTime = 0; refreshEngineLabel(); }
+  } else if (est < GPU_OFF_PAIRS && params.count <= gpu.enterCount * GPU_OFF_RATIO) {
+    gpu.exit(); refreshEngineLabel();
+  }
+}
+function refreshEngineLabel() {
+  $('renderer').textContent = renderer.name + (gpu && gpu.active ? ' · GPU計算' : '');
+}
+
+// タブの表示が切り替わった直後のフレームは、空白の時間を含むので FPS の計測から外す
+let skipFpsFrame = false;
+document.addEventListener('visibilitychange', () => { skipFpsFrame = true; });
+
+// GPU がリセットされた (ドライバの再起動や過負荷) ときは、復帰したらページを読み込み直す
+let contextLost = false;
+canvas.addEventListener('webglcontextlost', (e) => {
+  e.preventDefault(); contextLost = true;
+  showNotice('GPU がリセットされました。復帰したら読み込み直します');
+});
+canvas.addEventListener('webglcontextrestored', () => location.reload());
 
 function frame(now) {
-  let dtReal = (now - lastTime) / 1000;
+  if (contextLost) { requestAnimationFrame(frame); return; }
+  const dtRaw = (now - lastTime) / 1000;   // 実際の経過時間 (FPS の計測用)
+  let dtReal = dtRaw;
   lastTime = now;
   if (dtReal > 0.25) dtReal = 0.25; // タブ復帰時などの巨大な dt を無視
   elapsed += dtReal;
+  if (gpu && !skipFpsFrame) gpu.noteFrameMs(dtRaw * 1000);
 
   // 「創造」の行列補間 (一時停止中も進める)
   if (updateMatrixLerp(dtReal)) refreshMatrixView();
+
+  updateEngine();
 
   // 固定 dt でシミュレーション (リフレッシュレートに依存しない速度)
   if (!params.paused) {
@@ -688,30 +2036,53 @@ function frame(now) {
     // 60Hz では毎フレーム、120Hz では2フレームに1回進む。処理落ち時は動きが遅くなるだけ。
     accumulator += dtReal;
     if (accumulator >= DT * 0.75) {
-      const t0 = performance.now();
-      step(DT);
-      simMsSum += performance.now() - t0; simSteps++;
-      accumulator = Math.min(Math.max(accumulator - DT, 0), DT * 0.5);
+      if (par.inFlight(params.count)) {
+        // Worker の計算がまだ届いていない。このフレームは進めずに待つ
+        stallFrames++;
+        cpuHeavy(par.pendingMs);
+      } else {
+        const t0 = performance.now();
+        const usedWorkers = step(DT * params.timeScale);
+        const ms = performance.now() - t0;
+        if (!usedWorkers) par.observe(ms);
+        if (!(gpu && gpu.active)) cpuHeavy(usedWorkers ? Math.max(ms, par.lastLatencyMs) : ms);
+        simMsSum += ms; simSteps++;
+        accumulator = Math.min(Math.max(accumulator - DT, 0), DT * 0.5);
+        idleFrames = 0;
+      }
     }
   }
 
-  renderer.draw(params.count);
+  // 停止中は同じ点を同じ場所に描き続けるだけ。各画素の値は 0..255 の整数で、
+  // 「暗くする→点を足す」は値について単調なので、高々 255 回で値が変わらなくなる。
+  // それ以降は描いても1画素も変わらないので描画を省く (画面は保持されている)
+  if (idleFrames < IDLE_DRAW_FRAMES) {
+    renderer.draw(params.count);
+    idleFrames++;
+  }
 
-  // FPS を 0.5 秒ごとに更新
-  fpsFrames++; fpsTime += dtReal;
+  // FPS を 0.5 秒ごとに更新 (実際の経過時間で。極端に重くても数秒で自動削減が効くように)
+  if (skipFpsFrame) skipFpsFrame = false;
+  else { fpsFrames++; fpsTime += dtRaw; }
   if (fpsTime >= 0.5) {
     const fps = fpsFrames / fpsTime;
+    // 自動削減の判定は「シミュレーションが実際に進んだ」フレームで行う
+    const effectiveFps = (fpsFrames - stallFrames) / fpsTime;
+    stallFrames = 0;
     // 「計算」= シミュレーション1ステップの平均時間。60fps には 16ms 未満が必要。
     // 計算が軽いのに FPS が低い場合は、描画 (GPU) か画面側の制限が原因
+    // (GPU 計算中は命令を出す時間しか測れないので表示しない)
     ui.fps.textContent = 'FPS ' + fps.toFixed(0) +
-      (simSteps ? ' / 計算 ' + (simMsSum / simSteps).toFixed(1) + 'ms' : '');
+      (simSteps && !(gpu && gpu.active) ? ' / 計算 ' + (simMsSum / simSteps).toFixed(1) + 'ms' : '');
     simMsSum = 0; simSteps = 0;
     // 低 FPS が続いたら粒子数を減らす
-    if (elapsed > FPS_WARMUP && !document.hidden && fps < FPS_LOW_THRESHOLD) {
+    if (elapsed > FPS_WARMUP && !document.hidden && effectiveFps < FPS_LOW_THRESHOLD) {
       lowFpsTime += fpsTime;
       if (lowFpsTime >= FPS_LOW_DURATION && params.count > MIN_COUNT) {
         const before = params.count;
-        setParticleCount(Math.round(before * AUTO_REDUCE_FACTOR / 100) * 100);
+        // 極端に重いときは大きく減らす (100万個 → 数万個 まで何十秒も待たせない)
+        const factor = Math.max(0.5, Math.min(AUTO_REDUCE_FACTOR, effectiveFps / 60));
+        setParticleCount(Math.round(before * factor / 100) * 100);
         refreshLabels();
         showNotice(`負荷軽減: 粒子数を ${before} → ${params.count} に自動で減らしました`);
         lowFpsTime = 0;
@@ -730,13 +2101,15 @@ function frame(now) {
  * ===================================================================== */
 worldW = Math.max(1, window.innerWidth);
 worldH = Math.max(1, window.innerHeight);
-for (let i = 0; i < MAX_COUNT; i++) randomizeParticle(i);
+// 使う分だけ生成 (増やしたときは setParticleCount が増えた分を生成する)
+for (let i = 0; i < params.count; i++) randomizeParticle(i);
 randomMatrixInto(matrix);
 setParticleCount(DEFAULT_COUNT);
+renderer.onCountChanged(params.count, 0);   // 最初の粒子のタイプを描画側へ (以後は増えた分だけ送る)
 resize();
 refreshLabels();
 refreshMatrixView();
-$('renderer').textContent = renderer.name;
+refreshEngineLabel();
 requestAnimationFrame(frame);
 
 /* ---- ユーティリティ ---- */
