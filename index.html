@@ -99,7 +99,7 @@
   </div>
   <div class="row">
     <label><span>粒子数</span><span id="countVal"></span></label>
-    <input id="count" type="range">
+    <input id="count" type="range" title="画面の広さあたりの数として覚え、画面の大きさが変わると同じ混み具合になるよう増減します">
   </div>
   <div class="row">
     <label><span>相互作用半径 rMax</span><span id="rmaxVal"></span></label>
@@ -165,18 +165,21 @@
  * ===================================================================== */
 const DEFAULT_TYPES      = 6;       // 粒子の色の種類数 (初期値)
 const MAX_TYPES          = 10;      // 色の種類数の上限 (シェーダの配列サイズ)
-const DEFAULT_COUNT      = 3000;    // 初期粒子数
-const MIN_COUNT          = 500;     // スライダー最小
+// 粒子数は「画面の広さあたりの数 (密度)」で持ち、開いた画面の広さから個数を決める。
+// 世界の大きさ = 画面の大きさなので、個数のままだと小さい画面 (スマホ) ほど混み合って動きが変わるため
+const REF_AREA           = 1920 * 1080;          // 基準の画面の広さ [CSS px²] (個数だけの古い設定ファイルの換算用)
+const DEFAULT_DENSITY    = 17000 / REF_AREA;     // 初期の密度 [個 / CSS px²] (1920×1080 で 17000 個)
+const MIN_COUNT         = 500;     // スライダー最小
 const MAX_COUNT          = 1000000; // スライダー最大 (= 配列確保サイズ)。GPU 計算が使えるとき
 const MAX_COUNT_CPU      = 30000;   // GPU 計算が使えないときのスライダー最大
 
-const DEFAULT_RMAX       = 60;      // 相互作用半径 [CSS px]
+const DEFAULT_RMAX       = 66;      // 相互作用半径 [CSS px]
 const MIN_RMAX           = 30;
 const MAX_RMAX           = 160;
-const BETA               = 0.3;     // この正規化距離未満は常に反発
-const FORCE_FACTOR       = 10;      // 力の強さ (加速度 = f * rMax * FORCE_FACTOR)
+const BETA               = 0.32;    // この正規化距離未満は常に反発
+const FORCE_FACTOR       = 9.5;     // 力の強さ (加速度 = f * rMax * FORCE_FACTOR)
 
-const DEFAULT_HALF_LIFE  = 0.04;    // 速度が半分になるまでの時間 [s]
+const DEFAULT_HALF_LIFE  = 0.025;   // 速度が半分になるまでの時間 [s]
 const MIN_HALF_LIFE      = 0.01;
 const MAX_HALF_LIFE      = 0.20;
 const DT                 = 1 / 60;  // 固定シミュレーション時間刻み [s]
@@ -185,14 +188,15 @@ const SETTINGS_KEY       = 'shibalab-particle-life:settings';   // 設定の自�
 
 const MATRIX_LERP_TIME   = 1.5;     // 「創造」時に行列を補間する時間 [s]
 
-const POINTER_RADIUS     = 140;     // 「破壊」の影響半径 [CSS px]
-const POINTER_FORCE      = 4000;    // 「破壊」の押し出し加速度 [px/s^2]
+const POINTER_RADIUS     = 120;     // 「破壊」の影響半径 [CSS px]
+const POINTER_FORCE      = 5000;    // 「破壊」の押し出し加速度 [px/s^2]
 
 const MAX_DPR            = 1.5;     // devicePixelRatio の上限 (性能のため)
-const POINT_SIZE         = 6;       // 描画する点の大きさ [CSS px] (グロー込み)
-const POINT_ALPHA        = 0.55;    // 加算合成時の明るさ
-const TRAIL_FADE         = 0.22;    // 残像: 毎フレーム画面を暗くする割合 (1 = 残像なし)
-const TRAIL_FLOOR        = 2 / 255; // 残像が8bit丸めで残り続けないよう毎フレーム引く値
+const POINT_SIZE         = 8.5;     // 描画する点の大きさ [CSS px] (グロー込み)
+const POINT_ALPHA        = 0.52;    // 加算合成時の明るさ
+// 描画は 1/60 秒に 1 回 (画面の書き換えが 120Hz などでも同じ。メインループ参照)
+const TRAIL_FADE         = 0.84;    // 残像: 描くたびに画面を暗くする割合 (1 = 残像なし)
+const TRAIL_FLOOR        = 2 / 255; // 残像が8bit丸めで残り続けないよう描くたびに引く値
 
 const FPS_LOW_THRESHOLD  = 40;      // この FPS を下回り続けたら粒子数を自動削減
 const FPS_LOW_DURATION   = 2.0;     // 何秒続いたら削減するか
@@ -289,7 +293,8 @@ function pairTables() {
 }
 
 const params = {
-  count: DEFAULT_COUNT,
+  count: MIN_COUNT,          // 今の粒子数 (起動時に 密度 × 画面の広さ で決め直す)
+  density: DEFAULT_DENSITY,  // 画面の広さあたりの粒子数 [個 / CSS px²]。設定として保存するのはこちら
   rMaxSetting: DEFAULT_RMAX, // スライダーで指定した値
   rMax: DEFAULT_RMAX,        // 実際に使う値 (極端に小さいウィンドウでは制限される)
   halfLife: DEFAULT_HALF_LIFE,
@@ -392,6 +397,18 @@ function setParticleCount(n) {
   if (gpu && gpu.active && n > from) gpu.uploadRange(from, n);   // GPU 計算中は増えた分だけ送る
 }
 
+/** 今の密度と画面の広さから決まる粒子数 */
+function countForScreen() {
+  return Math.max(MIN_COUNT, Math.min(maxCount(), Math.round(params.density * worldW * worldH)));
+}
+/** 密度に合わせて粒子数を決め直す (起動・画面サイズの変更・設定の読み込み) */
+function fitCountToScreen() { setParticleCount(countForScreen()); }
+/** 粒子数を直接決める (スライダー・自動削減)。その数を今の画面での密度として覚える */
+function setCountAndDensity(n) {
+  setParticleCount(n);
+  params.density = params.count / (worldW * worldH);
+}
+
 /** グリッドの寸法を決める。セル幅は rMax 以上なので 3×3 セルの探索で十分 */
 function rebuildGrid() {
   // rMax が世界の半分を超えると最短像 (minimum image) が一意でなくなるので制限
@@ -424,7 +441,13 @@ function resize() {
   rebuildGrid();   // simVersion も進む
   idleFrames = 0;
   renderer.resize(worldW, worldH, Math.min(window.devicePixelRatio || 1, MAX_DPR));
+  // 画面の広さが変わったら、同じ密度になるよう粒子数を合わせる (サイズ変更が落ち着いてから)
+  if (worldW * worldH !== oldW * oldH) {
+    clearTimeout(fitTimer);
+    fitTimer = setTimeout(() => { fitCountToScreen(); refreshLabels(); }, 300);
+  }
 }
+let fitTimer = 0;
 
 /* =====================================================================
  *  シミュレーション本体
@@ -964,9 +987,9 @@ function createWebGLRenderer() {
   gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
 
-  // 頂点データ: x, y (毎フレーム転送) と type (粒子数が変わったときだけ転送)。GPU 側は最大サイズで確保
+  // 頂点データ: x, y (描くたびに転送) と type (粒子数が変わったときだけ転送)。GPU 側は最大サイズで確保
   const typeData = new Float32Array(MAX_COUNT);
-  let xView = posX.subarray(0, DEFAULT_COUNT), yView = posY.subarray(0, DEFAULT_COUNT); // 粒子数変更時のみ作り直す
+  let xView = posX.subarray(0, params.count), yView = posY.subarray(0, params.count); // 粒子数変更時のみ作り直す
   const xBuf = gl.createBuffer(), yBuf = gl.createBuffer(), typeBuf = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, xBuf);
   gl.bufferData(gl.ARRAY_BUFFER, MAX_COUNT * 4, gl.DYNAMIC_DRAW);
@@ -2579,7 +2602,7 @@ const countFromSlider = (v) => {
   return Math.round(c / unit) * unit;
 };
 const sliderFromCount = (c) => Math.round(Math.log(c / MIN_COUNT) / Math.log(maxCount() / MIN_COUNT) * COUNT_STEPS);
-setupSlider(ui.count, 0, COUNT_STEPS, 1, sliderFromCount(DEFAULT_COUNT));
+setupSlider(ui.count, 0, COUNT_STEPS, 1, 0);   // 位置は起動時に refreshLabels で合わせる
 setupSlider(ui.rmax, MIN_RMAX, MAX_RMAX, 1, DEFAULT_RMAX);
 setupSlider(ui.friction, MIN_HALF_LIFE, MAX_HALF_LIFE, 0.005, DEFAULT_HALF_LIFE);
 setupSlider(ui.types, 1, MAX_TYPES, 1, DEFAULT_TYPES);
@@ -2606,7 +2629,7 @@ function refreshLabels() {
 }
 
 ui.count.addEventListener('input', () => {
-  setParticleCount(countFromSlider(+ui.count.value));
+  setCountAndDensity(countFromSlider(+ui.count.value));
   ui.countVal.textContent = params.count;   // つまみは触っている位置のまま
 });
 ui.rmax.addEventListener('input', () => { params.rMaxSetting = +ui.rmax.value; rebuildGrid(); refreshLabels(); });
@@ -2995,18 +3018,24 @@ function frame(now) {
 
   updateEngine();
 
-  // 固定 dt でシミュレーション (リフレッシュレートに依存しない速度)
-  if (!params.paused) {
-    // 1フレームに最大1ステップ。遅れを取り戻そうと複数ステップ回すと、
-    // 一度の処理落ちで「毎フレーム2ステップ → 30fps に固定」という悪循環になるため。
-    // 60Hz では毎フレーム、120Hz では2フレームに1回進む。処理落ち時は動きが遅くなるだけ。
-    accumulator += dtReal;
-    if (accumulator >= DT * 0.75) {
-      if ((gpu && gpu.busy) || par.inFlight(params.count)) {
-        // GPU からの読み戻し中 / Worker の計算がまだ届いていない。このフレームは進めずに待つ
-        stallFrames++;
-        if (!(gpu && gpu.busy)) cpuHeavy(par.pendingMs);
-      } else {
+  // 固定 dt で「コマ」を進める: 1 コマ = 計算 1 ステップ (×速度) + 描画 1 回。
+  // 1フレームに最大1コマ。遅れを取り戻そうと複数ステップ回すと、
+  // 一度の処理落ちで「毎フレーム2ステップ → 30fps に固定」という悪循環になるため。
+  // 60Hz では毎フレーム、120Hz では2フレームに1回、144Hz・75Hz でも平均 60 コマ/秒 (余りを繰り越す)。
+  // コマが進まないフレームは描かない (前の絵がそのまま表示される) ので、
+  // 動きの速さも残像 (描くたびに暗くする量) も画面の書き換え回数によらず同じ。処理落ち時は動きが遅くなるだけ。
+  // 停止中も同じ間隔で描く (止めた直後に残像が消えていく速さを揃える)
+  accumulator += dtReal;
+  let tick = false;
+  if (accumulator >= DT * 0.75) {
+    if (!params.paused && ((gpu && gpu.busy) || par.inFlight(params.count))) {
+      // GPU からの読み戻し中 / Worker の計算がまだ届いていない。このフレームは進めずに待つ
+      stallFrames++;
+      if (!(gpu && gpu.busy)) cpuHeavy(par.pendingMs);
+    } else {
+      tick = true;
+      accumulator = Math.min(Math.max(accumulator - DT, -DT * 0.25), DT * 0.5);
+      if (!params.paused) {
         // シミュレーション速度: 1 フレームに speedNow ステップ (各ステップは ×1 と同じ計算)
         for (let s = 0; s < speedNow; s++) {
           if (s > 0 && ((gpu && gpu.busy) || par.inFlight(params.count))) break;
@@ -3017,21 +3046,20 @@ function frame(now) {
           if (!(gpu && gpu.active)) cpuHeavy(usedWorkers ? Math.max(ms, par.lastLatencyMs) : ms);
           simMsSum += ms; simSteps++;
         }
-        accumulator = Math.min(Math.max(accumulator - DT, 0), DT * 0.5);
         idleFrames = 0;
       }
     }
-    // 自動で「創造」
-    if (params.autoCreate > 0) {
-      autoCreateTime += dtReal;
-      if (autoCreateTime >= params.autoCreate) { autoCreateTime = 0; startCreation(); }
-    }
+  }
+  // 自動で「創造」
+  if (!params.paused && params.autoCreate > 0) {
+    autoCreateTime += dtReal;
+    if (autoCreateTime >= params.autoCreate) { autoCreateTime = 0; startCreation(); }
   }
 
   // 停止中は同じ点を同じ場所に描き続けるだけ。各画素の値は 0..255 の整数で、
   // 「暗くする→点を足す」は値について単調なので、高々 255 回で値が変わらなくなる。
   // それ以降は描いても1画素も変わらないので描画を省く (画面は保持されている)
-  if (idleFrames < IDLE_DRAW_FRAMES) {
+  if (tick && idleFrames < IDLE_DRAW_FRAMES) {
     renderer.draw(params.count);
     idleFrames++;
   }
@@ -3070,7 +3098,7 @@ function frame(now) {
         const before = params.count;
         // 極端に重いときは大きく減らす (100万個 → 数万個 まで何十秒も待たせない)
         const factor = Math.max(0.5, Math.min(AUTO_REDUCE_FACTOR, effectiveFps / 60));
-        setParticleCount(Math.round(before * factor / 100) * 100);
+        setCountAndDensity(Math.round(before * factor / 100) * 100);
         refreshLabels();
         showNotice(`負荷軽減: 粒子数を ${before} → ${params.count} に自動で減らしました`);
         lowFpsTime = 0;
@@ -3094,8 +3122,9 @@ function frame(now) {
  * ===================================================================== */
 function collectSettings() {
   return {
-    app: 'shibalab-particle-life', v: 1,
-    count: params.count, rMax: params.rMaxSetting, halfLife: params.halfLife, types: numTypes, speed: params.speed,
+    // density: 100万 CSS px² あたりの粒子数。読み込んだ端末の画面の広さに合わせて個数を決める (v1 は個数 count)
+    app: 'shibalab-particle-life', v: 2,
+    density: Math.round(params.density * 1e9) / 1e3, rMax: params.rMaxSetting, halfLife: params.halfLife, types: numTypes, speed: params.speed,
     matrix: Array.from(matrix), pairMax: Array.from(pairMax), pairMin: Array.from(pairMin),
     adv: Object.fromEntries(ADVANCED.map(([k]) => [k, params[k]])),
   };
@@ -3106,8 +3135,9 @@ function saveSettings() {
   if (s === lastSaved) return;
   try { localStorage.setItem(SETTINGS_KEY, s); lastSaved = s; } catch (e) { /* 保存できない環境 (プライベートモード等) */ }
 }
-/** 設定を当てはめる (値はすべて範囲内に丸める)。粒子の位置はそのまま */
-function applySettings(s) {
+/** 設定を当てはめる (値はすべて範囲内に丸める)。粒子の位置はそのまま。
+ *  legacyArea: 個数 (count) だけの古い形式を密度に直すときの画面の広さ (ファイルは基準の広さ、この端末の自動保存は今の広さ) */
+function applySettings(s, legacyArea = REF_AREA) {
   if (!s || typeof s !== 'object') return false;
   const num = (v, lo, hi, d) => (typeof v === 'number' && isFinite(v)) ? Math.max(lo, Math.min(hi, v)) : d;
   if (s.types !== undefined) setNumTypes(num(s.types, 1, MAX_TYPES, numTypes) | 0);
@@ -3125,7 +3155,13 @@ function applySettings(s) {
   if (s.rMax !== undefined) { params.rMaxSetting = num(s.rMax, MIN_RMAX, MAX_RMAX, params.rMaxSetting); rebuildGrid(); }
   if (s.halfLife !== undefined) params.halfLife = num(s.halfLife, MIN_HALF_LIFE, MAX_HALF_LIFE, params.halfLife);
   if (s.speed !== undefined) setSpeed(num(s.speed, 1, MAX_SPEED, 1));
-  if (s.count !== undefined) setParticleCount(num(s.count, MIN_COUNT, maxCount(), params.count));
+  if (typeof s.density === 'number' && isFinite(s.density) && s.density > 0) {
+    params.density = Math.min(s.density, 1e6) / 1e6;     // 100万 px² あたり → 1 px² あたり
+    fitCountToScreen();
+  } else if (s.count !== undefined) {
+    params.density = num(s.count, MIN_COUNT, MAX_COUNT, params.count) / legacyArea;
+    fitCountToScreen();
+  }
   simVersion++; idleFrames = 0;
   refreshLabels(); refreshMatrixView(); refreshAdvanced(); updateEngine(); refreshEngineLabel();
   return true;
@@ -3155,7 +3191,7 @@ $('btnResetAll').addEventListener('click', () => {
   params.rMaxSetting = DEFAULT_RMAX; rebuildGrid();
   params.halfLife = DEFAULT_HALF_LIFE;
   setSpeed(1);
-  setParticleCount(DEFAULT_COUNT);
+  params.density = DEFAULT_DENSITY; fitCountToScreen();
   startCreation();
   refreshLabels(); refreshMatrixView(); refreshAdvanced(); updateEngine(); refreshEngineLabel();
   showNotice('すべて初期値に戻しました');
@@ -3169,15 +3205,16 @@ async function boot() {
   await chooseBackend();
   worldW = Math.max(1, window.innerWidth);
   worldH = Math.max(1, window.innerHeight);
-  // 使う分だけ生成 (増やしたときは setParticleCount が増えた分を生成する)
+  // 粒子数 = 密度 × 画面の広さ。使う分だけ生成 (増やしたときは setParticleCount が増えた分を生成する)
+  params.count = countForScreen();
   for (let i = 0; i < params.count; i++) randomizeParticle(i);
   randomMatrixInto(matrix);
-  setParticleCount(DEFAULT_COUNT);
+  simVersion++; idleFrames = 0;
   renderer.onCountChanged(params.count, 0);   // 最初の粒子のタイプを描画側へ (以後は増えた分だけ送る)
   resize();
-  // 前回の設定を戻す (?reset を付けると戻さない)
+  // 前回の設定を戻す (?reset を付けると戻さない)。個数だけの古い自動保存は、この端末の今の広さで密度に直す
   if (!/[?&]reset/.test(location.search)) {
-    try { const saved = localStorage.getItem(SETTINGS_KEY); if (saved) applySettings(JSON.parse(saved)); }
+    try { const saved = localStorage.getItem(SETTINGS_KEY); if (saved) applySettings(JSON.parse(saved), worldW * worldH); }
     catch (e) { console.warn('保存された設定を読めません:', e); }
   }
   refreshLabels();
