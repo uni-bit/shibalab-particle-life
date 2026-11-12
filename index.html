@@ -71,6 +71,14 @@
   #matrixInfo { min-height: 1.5em; margin-top: 5px; font-size: 11px; display: flex; align-items: center; gap: 4px; }
   #matrixInfo .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: 0 0 auto; }
   #matrixInfo .val { font-variant-numeric: tabular-nums; font-weight: 600; margin-left: auto; }
+  /* 行列の編集対象: 力 / 最大距離 / 最小距離 */
+  #matrixMode { display: flex; gap: 3px; margin-top: 5px; }
+  #panel #matrixMode button { flex: 1 1 0; font-size: 11px; padding: 2px 4px; opacity: 0.55; }
+  #panel #matrixMode button.on { opacity: 1; background: rgba(255,255,255,0.18); border-color: rgba(255,255,255,0.35); }
+  #importFile { display: none; }
+  /* 操作がしばらくないとき (詳細設定で指定): パネルとカーソルを隠す */
+  body.idle #panel, body.idle #panelOpen { display: none !important; }
+  body.idle #view { cursor: none; }
 
   /* 「破壊」中のポインタ位置を示すリング */
   #ring {
@@ -105,12 +113,22 @@
     <label><span>色の数</span><span id="typesVal"></span></label>
     <input id="types" type="range">
   </div>
+  <div class="row">
+    <label><span>シミュレーション速度</span><span id="speedVal"></span></label>
+    <input id="speed" type="range" title="1 フレームに進めるステップ数 (1〜8 キー)">
+  </div>
   <div class="buttons">
     <button id="btnCreate" title="R キー">創造 (R)</button>
     <button id="btnPause" title="Space キー">一時停止</button>
+    <button id="btnScatter" title="位置だけをばらまき直す (関係はそのまま)。S キー">散らす (S)</button>
     <button id="btnFull" title="F キー">全画面 (F)</button>
   </div>
   <div class="section"><b>色どうしの関係</b><span class="hint">セルを上下にドラッグ</span></div>
+  <div id="matrixMode">
+    <button data-mode="force" class="on" title="引き寄せる (+) / 離れる (-) 強さ">力</button>
+    <button data-mode="max" title="その色の組が影響し合う最大の距離 (rMax に対する割合)">最大距離</button>
+    <button data-mode="min" title="近すぎて反発し合う距離 (その組の最大距離に対する割合)">最小距離</button>
+  </div>
   <div id="matrix"></div>
   <div id="matrixInfo"></div>
   <div class="buttons small" id="presets">
@@ -120,15 +138,23 @@
     <button data-preset="symmetric" title="A→B と B→A を同じにする (落ち着いた動きになる)">対称</button>
     <button data-preset="invert" title="引き合う ⇔ 反発する を入れ替える">反転</button>
     <button data-preset="zero" title="すべての関係を 0 にする">ゼロ</button>
+    <button data-preset="ranges" title="色の組ごとの最大・最小距離をすべて初期値に戻す">範囲を揃える</button>
   </div>
   <details id="advanced">
     <summary>詳細設定</summary>
     <div id="advRows"></div>
     <div class="buttons"><button id="btnResetAdv">詳細設定を初期値に戻す</button></div>
+    <div class="buttons small">
+      <button id="btnExport" title="今の設定 (関係・範囲・詳細設定など) をファイルに保存">設定を書き出す</button>
+      <button id="btnImport" title="書き出した設定ファイルを読み込む">設定を読み込む</button>
+      <button id="btnResetAll" title="保存された設定を消して、すべて初期値に戻す">すべて初期値に</button>
+    </div>
+    <div class="hint">設定はこのブラウザに自動で保存され、次に開いたときに戻ります</div>
+    <input id="importFile" type="file" accept="application/json,.json">
   </details>
   <div id="stats"><span id="fps">FPS --</span><span id="renderer"></span></div>
   <div id="notice"></div>
-  <div id="help">押し続けて「破壊」/ R 創造 / Space 停止 / F 全画面 / H パネルを隠す・出す</div>
+  <div id="help">押し続けて「破壊」/ R 創造 / S 散らす / 1〜8 速度 / Space 停止 / F 全画面 / H パネルを隠す・出す</div>
 </div>
 
 <script>
@@ -154,6 +180,8 @@ const DEFAULT_HALF_LIFE  = 0.04;    // 速度が半分になるまでの時間 [
 const MIN_HALF_LIFE      = 0.01;
 const MAX_HALF_LIFE      = 0.20;
 const DT                 = 1 / 60;  // 固定シミュレーション時間刻み [s]
+const MAX_SPEED          = 8;       // シミュレーション速度 (1 フレームに進めるステップ数) の上限
+const SETTINGS_KEY       = 'shibalab-particle-life:settings';   // 設定の自動保存先 (localStorage)
 
 const MATRIX_LERP_TIME   = 1.5;     // 「創造」時に行列を補間する時間 [s]
 
@@ -222,12 +250,51 @@ let matrixFrom = new Float32Array(DEFAULT_TYPES * DEFAULT_TYPES); // 補間の�
 let matrixTo   = new Float32Array(DEFAULT_TYPES * DEFAULT_TYPES); // 補間の終点
 let matrixLerpT = 1;  // 0..1 (1 = 補間完了)
 
+// 色の組ごとの影響範囲 (添字は matrix と同じ: i*numTypes + j = タイプ i が j から受ける力)
+//   pairMax = 最大距離 (rMax に対する割合 0.1..1)。グリッドは rMax で作るので rMax を超えない
+//   pairMin = 近すぎて反発する距離 (その組の最大距離に対する割合。全体の初期値は params.beta)
+// すべて初期値 (pairMax = 1, pairMin = params.beta) のときは元と同じ計算 (CPU 版はビット単位で同一)
+let pairMax = new Float64Array(DEFAULT_TYPES * DEFAULT_TYPES).fill(1);
+let pairMin = new Float64Array(DEFAULT_TYPES * DEFAULT_TYPES).fill(BETA);
+let rangesAreUniform = true;
+function updateRangesUniform() {
+  rangesAreUniform = true;
+  for (let k = 0; k < pairMax.length; k++) {
+    if (pairMax[k] !== 1 || pairMin[k] !== params.beta) { rangesAreUniform = false; break; }
+  }
+}
+/** 組ごとの影響範囲を1つ書き換える */
+function setPairRange(arr, k, v, lo, hi) {
+  arr[k] = Math.max(lo, Math.min(hi, v));
+  updateRangesUniform();
+  simVersion++;
+}
+/** すべての組を初期値に (全体の反発距離 params.beta) */
+function resetPairRanges() {
+  pairMax.fill(1); pairMin.fill(params.beta);
+  updateRangesUniform();
+  simVersion++;
+}
+// CPU 版で使う組ごとの表 (R = rMax × pairMax, β = pairMin)
+const pairT = {
+  R2: new Float64Array(MAX_TYPES * MAX_TYPES), IR: new Float64Array(MAX_TYPES * MAX_TYPES),
+  B: new Float64Array(MAX_TYPES * MAX_TYPES), IB: new Float64Array(MAX_TYPES * MAX_TYPES), IOMB: new Float64Array(MAX_TYPES * MAX_TYPES),
+};
+function pairTables() {
+  for (let k = 0; k < numTypes * numTypes; k++) {
+    const R = params.rMax * pairMax[k], b = pairMin[k];
+    pairT.R2[k] = R * R; pairT.IR[k] = 1 / R; pairT.B[k] = b; pairT.IB[k] = 1 / b; pairT.IOMB[k] = 1 / (1 - b);
+  }
+  return pairT;
+}
+
 const params = {
   count: DEFAULT_COUNT,
   rMaxSetting: DEFAULT_RMAX, // スライダーで指定した値
   rMax: DEFAULT_RMAX,        // 実際に使う値 (極端に小さいウィンドウでは制限される)
   halfLife: DEFAULT_HALF_LIFE,
   paused: false,
+  speed: 1,                  // シミュレーション速度: 1 フレームに進めるステップ数 (見た目の動きは ×1 と同じ式)
   // 「詳細設定」で変えられる値 (初期値は上の定数)
   timeScale: 1,                      // 時間の速さ (1 ステップで進める時間 = DT × これ)
   forceFactor: FORCE_FACTOR,
@@ -238,6 +305,8 @@ const params = {
   pointerRadius: POINTER_RADIUS,
   pointerForce: POINTER_FORCE,
   lerpTime: MATRIX_LERP_TIME,
+  autoCreate: 0,             // この秒数ごとに自動で「創造」(0 = しない)
+  idleHide: 0,               // 操作がこの秒数ないとパネルとカーソルを隠す (0 = しない)
 };
 
 // 世界 (トーラス) のサイズ = ウィンドウの CSS ピクセルサイズ
@@ -253,7 +322,7 @@ let cellStart = new Int32Array(2);
 let simVersion = 0;
 // 停止中に同じ絵を描き続けているフレーム数 (0 = 直前に何か変わった)
 let idleFrames = 0;
-// GPU 計算エンジン (WebGL2 が使えるときのみ。下で生成)
+// GPU 計算エンジン (WebGPU、なければ WebGL2 のときのみ。chooseBackend で生成)
 let gpu = null;
 
 /* ---------------------------------------------------------------------
@@ -413,6 +482,12 @@ function step(dt) {
   // (グリッドは必ず 3×3 以上 → rebuildGrid 参照)
   forceX.fill(0, 0, n);
   forceY.fill(0, 0, n);
+  if (!rangesAreUniform) {
+    // 色の組ごとに影響範囲が違う: 走査順は同じで、組ごとの距離で力を求める
+    const T = pairTables();
+    bandForcesPP(0, gridRows, gridCols, gridRows, worldW, worldH, rMax2, nT, matrix,
+                 T.R2, T.IR, T.B, T.IB, T.IOMB, sortX, sortY, sortT, cellStart, forceX, forceY);
+  } else
   for (let cy = 0; cy < gridRows; cy++) {
     for (let cx = 0; cx < gridCols; cx++) {
       const c = cy * gridCols + cx;
@@ -578,6 +653,65 @@ function bandForces(r0, r1, cols, rows, W, H, rMax2, invRMax, beta, nTypes, M, s
   }
 }
 
+/** bandForces と同じ走査で、色の組ごとに影響範囲 (最大距離 R・反発距離 β) が違う場合の力。
+ *  a が b から受ける力は組 (a, b) の R・β・係数、b が a から受ける力は組 (b, a) のもので別々に求める */
+function bandForcesPP(r0, r1, cols, rows, W, H, rMax2, nTypes, M, R2, IR, B, IB, IOMB, sx, sy, st, cs, fx, fy) {
+  const above = r0 === 0 ? rows - 1 : r0 - 1;
+  for (let cy = 0; cy < rows; cy++) {
+    const aOwn = cy >= r0 && cy < r1;
+    if (!aOwn && cy !== above) continue;
+    const ny1 = cy + 1 >= rows ? 0 : cy + 1;
+    const offYDown = cy + 1 >= rows ? H : 0;
+    const downOwn = ny1 >= r0 && ny1 < r1;
+    for (let cx = 0; cx < cols; cx++) {
+      const c = cy * cols + cx;
+      const s0 = cs[c], e0 = cs[c + 1];
+      if (s0 === e0) continue;
+      for (let m = 0; m < 5; m++) {
+        let q0, q1, offX = 0, offY = 0, bOwn;
+        if (m === 0) { q0 = s0; q1 = e0; bOwn = aOwn; }
+        else {
+          let nx = (m === 1 || m === 4) ? cx + 1 : (m === 2 ? cx - 1 : cx);
+          let ny = cy;
+          if (nx < 0) { nx += cols; offX = -W; } else if (nx >= cols) { nx -= cols; offX = W; }
+          if (m === 1) bOwn = aOwn;
+          else { ny = ny1; offY = offYDown; bOwn = downOwn; }
+          const q = ny * cols + nx;
+          q0 = cs[q]; q1 = cs[q + 1];
+          if (q0 === q1) continue;
+        }
+        if (!aOwn && !bOwn) continue;
+        for (let a = s0; a < e0; a++) {
+          const xa = sx[a] - offX, ya = sy[a] - offY;
+          const ta = st[a], rowA = ta * nTypes;
+          let fxa = 0, fya = 0;
+          for (let b = (m === 0 ? a + 1 : q0); b < q1; b++) {
+            const dx = sx[b] - xa;
+            const dy = sy[b] - ya;
+            const d2 = dx * dx + dy * dy;
+            if (d2 >= rMax2 || d2 === 0) continue;
+            const d = Math.sqrt(d2);
+            const invD = 1 / d;
+            const tb = st[b];
+            const kab = rowA + tb, kba = tb * nTypes + ta;
+            if (d2 < R2[kab]) {
+              const r = d * IR[kab], bt = B[kab];
+              const sc = r < bt ? (r * IB[kab] - 1) * invD : M[kab] * (1 - Math.abs(2 * r - 1 - bt) * IOMB[kab]) * invD;
+              fxa += dx * sc; fya += dy * sc;
+            }
+            if (bOwn && d2 < R2[kba]) {
+              const r = d * IR[kba], bt = B[kba];
+              const sc = r < bt ? (r * IB[kba] - 1) * invD : M[kba] * (1 - Math.abs(2 * r - 1 - bt) * IOMB[kba]) * invD;
+              fx[b] -= dx * sc; fy[b] -= dy * sc;
+            }
+          }
+          if (aOwn) { fx[a] += fxa; fy[a] += fya; }
+        }
+      }
+    }
+  }
+}
+
 function workerMain() {
   let fx = new Float32Array(0), fy = new Float32Array(0);
   self.onmessage = (e) => {
@@ -586,8 +720,13 @@ function workerMain() {
     const t0 = performance.now();
     const s = j.cs[j.r0 * j.cols], t = j.cs[j.r1 * j.cols];   // 自分の粒子 (セル順で連続)
     fx.fill(0, s, t); fy.fill(0, s, t);
-    bandForces(j.r0, j.r1, j.cols, j.rows, j.W, j.H, j.rMax2, j.invRMax, j.beta, j.nTypes,
-               j.M, j.sx, j.sy, j.st, j.cs, fx, fy);
+    if (j.pp) {
+      bandForcesPP(j.r0, j.r1, j.cols, j.rows, j.W, j.H, j.rMax2, j.nTypes, j.M,
+                   j.pp.R2, j.pp.IR, j.pp.B, j.pp.IB, j.pp.IOMB, j.sx, j.sy, j.st, j.cs, fx, fy);
+    } else {
+      bandForces(j.r0, j.r1, j.cols, j.rows, j.W, j.H, j.rMax2, j.invRMax, j.beta, j.nTypes,
+                 j.M, j.sx, j.sy, j.st, j.cs, fx, fy);
+    }
     const ox = fx.slice(s, t), oy = fy.slice(s, t);
     self.postMessage({ job: j.job, s, ox, oy, ms: performance.now() - t0 }, [ox.buffer, oy.buffer]);
   };
@@ -599,7 +738,7 @@ const par = (() => {
     const hc = navigator.hardwareConcurrency || 2;
     const nW = Math.max(1, Math.min(MAX_WORKERS, hc - 1));
     if (hc >= 2 && typeof Worker !== 'undefined') {
-      const src = `'use strict';\n${bandForces.toString()}\n(${workerMain.toString()})();`;
+      const src = `'use strict';\n${bandForces.toString()}\n${bandForcesPP.toString()}\n(${workerMain.toString()})();`;
       const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
       for (let i = 0; i < nW; i++) workers.push(new Worker(url));
     }
@@ -681,7 +820,12 @@ const par = (() => {
         beta: params.beta, nTypes: numTypes, M: matrix.slice(),
         sx: sortX.slice(0, n), sy: sortY.slice(0, n), st: sortT.slice(0, n),
         cs: cellStart.slice(0, cols * rows + 1), r0: 0, r1: 0,
+        pp: null,
       };
+      if (!rangesAreUniform) {
+        const T = pairTables(), nn = numTypes * numTypes;
+        base.pp = { R2: T.R2.slice(0, nn), IR: T.IR.slice(0, nn), B: T.B.slice(0, nn), IB: T.IB.slice(0, nn), IOMB: T.IOMB.slice(0, nn) };
+      }
       let r0 = 0, acc = 0;
       for (let w = 0; w < nb && r0 < rows; w++) {
         let r1 = r0;
@@ -1029,9 +1173,10 @@ function createGpuSim(r) {
     gl.bufferData(gl.PIXEL_PACK_BUFFER, CHUNKS * fRowsMax * 4, gl.STREAM_READ);
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
     const workIo = new Float32Array(CHUNKS * fRowsMax);
-    // 係数行列 (行 = 自分の色, 列 = 相手の色)。uniform 配列を粒子ごとに違う添字で読むより速い
-    const mtex   = tex(gl.R32F, MAX_TYPES, MAX_TYPES);
-    const mIo    = new Float32Array(MAX_TYPES * MAX_TYPES);
+    // 色の組ごとの値 (行 = 自分の色, 列 = 相手の色): 係数, 最大距離 [px], 反発距離の割合。
+    // uniform 配列を粒子ごとに違う添字で読むより速い
+    const mtex   = tex(gl.RGBA32F, MAX_TYPES, MAX_TYPES);
+    const mIo    = new Float32Array(MAX_TYPES * MAX_TYPES * 4);
 
     const VS = `#version 300 es
       layout(location = 0) in vec2 aPos;
@@ -1212,7 +1357,10 @@ function createGpuSim(r) {
               int s1 = int(texelFetch(uCells, at(base + a1 + 1, uW), 0).x);
               cand += s1 - s0 + 4;                       // + 区間ごとの準備の手間
               if (s0 >= s1) continue;
-              float m = texelFetch(uMat, ivec2(tb, ta), 0).x;
+              vec4 pp = texelFetch(uMat, ivec2(tb, ta), 0);   // この組の係数・最大距離・反発距離の割合
+              float m = pp.x;
+              float rMax2 = pp.y * pp.y, invRMax = 1.0 / pp.y;
+              float BETA = pp.z, INV_BETA = 1.0 / pp.z, INV_OMB = 1.0 / (1.0 - pp.z);
               // 位置は2粒子ずつ1画素。4個 (2画素) ずつ先に読んでから順に足す (足す順番は1個ずつと同じ)
               int s = s0;
               if ((s & 1) == 1) { vec2 b0 = texelFetch(uSPos, at(s >> 1, uW), 0).zw; ${ACC('b0')} s++; }
@@ -1505,9 +1653,12 @@ function createGpuSim(r) {
 
         // 5) forces + integrate (セル順で計算し result へ)
         gl.useProgram(stepP.p);
-        for (let a = 0; a < numTypes; a++) for (let b = 0; b < numTypes; b++) mIo[a * MAX_TYPES + b] = matrix[a * numTypes + b];
+        for (let a = 0; a < numTypes; a++) for (let b = 0; b < numTypes; b++) {
+          const k = a * numTypes + b, o = (a * MAX_TYPES + b) * 4;
+          mIo[o] = matrix[k]; mIo[o + 1] = params.rMax * pairMax[k]; mIo[o + 2] = pairMin[k];
+        }
         bindTex(1, mtex.t);
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, MAX_TYPES, MAX_TYPES, gl.RED, gl.FLOAT, mIo);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, MAX_TYPES, MAX_TYPES, gl.RGBA, gl.FLOAT, mIo);
         bindTex(0, state[cur].t); bindTex(2, sorted.t); bindTex(3, cells.t); bindTex(4, spos.t);
         const u = stepP.u;
         gl.uniform1i(u.uState, 0); gl.uniform1i(u.uMat, 1); gl.uniform1i(u.uSorted, 2); gl.uniform1i(u.uCells, 3);
@@ -1622,6 +1773,730 @@ function createGpuSim(r) {
   };
 }
 
+/* =====================================================================
+ *  WebGPU (使えるときはこちらを優先): 描画 + GPU 計算エンジン
+ *
+ *  描画は WebGL 版と同じ手順・同じ式 (残像の暗くする→少し引く、点は加算合成のソフトグロー)。
+ *  点スプライトの代わりに同じ大きさの四角形を粒子ごとに描く (WebGL 版も内部では四角形に展開される)。
+ *  残像を保持するテクスチャへ上下反転して描き (WebGL 版と同じ丸めになる)、反転を戻してキャンバスへ写す。
+ *
+ *  GPU 計算 (粒子が多いとき。状態は GPU 上に置いたまま):
+ *    1) 各粒子のキーを2つ求め、セルごとの個数を原子加算で数える
+ *       近傍用: (細かい行, 色, 細かい列) の順 / 担当用: 1px (最大辺が 1024 を超える画面では 最大辺/1024 px) 格子の
+ *       ヒルベルト曲線順 (近い粒子が連続する)
+ *    2) 個数の累積和 (2段) → 各セルの開始位置。粒子を並べ替えて詰める (計数ソート)
+ *    3) 力: ヒルベルト順に連続する 32 粒子を1つの作業グループが受け持つ。
+ *       各行について「32 粒子それぞれの半径 rMax の円の弦」の和集合の範囲だけを、色ごとに
+ *       連続した区間として読み、64 個ずつ共有メモリに載せて全員で使う (係数は色ごとに1回)。
+ *       空の区間は詰めて表にし、各レーンは今の区間をレジスタに持って順に進む。
+ *       力の式は比較・選択を使わない形 (rMax・反発距離の外では自然に 0 になる)。
+ *    4) 速度・位置を更新して書き戻す (粒子番号の位置へ直接)
+ *  力の式・摩擦・破壊・トーラスは CPU 版と同じ (32bit 浮動小数のため丸め誤差の分だけ異なる)。
+ *  並べ替えの順番 (同じセル内) は原子加算の順で毎回変わりうる → 足す順番による丸め誤差の分だけ揺らぐ。
+ * ===================================================================== */
+async function createWebGPUBackend() {
+  if (!navigator.gpu) return null;
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  if (!adapter) return null;
+  const want = ['timestamp-query', 'subgroups'].filter((f) => adapter.features.has(f));
+  const device = await adapter.requestDevice({
+    requiredFeatures: want,
+    requiredLimits: {
+      maxStorageBufferBindingSize: Math.min(adapter.limits.maxStorageBufferBindingSize, 256 * 1024 * 1024),
+      maxBufferSize: Math.min(adapter.limits.maxBufferSize, 256 * 1024 * 1024),
+      maxTextureDimension2D: adapter.limits.maxTextureDimension2D,     // 超大画面でもキャンバスを作れるように
+    },
+  });
+  // キャンバスの WebGPU コンテキストは、シェーダが全部通ったのを確かめてから取る
+  // (一度取ると同じキャンバスで WebGL / 2D が使えなくなるため)
+  let ctx = null;
+  const FORMAT = 'rgba8unorm';
+  device.lost.then((info) => {
+    if (info.reason === 'destroyed') return;
+    contextLost = true;
+    showNotice('GPU がリセットされました。読み込み直します');
+    setTimeout(() => location.reload(), 1500);
+  });
+  // 32 レーンの subgroup がそろう環境 (NVIDIA など) では接頭和を subgroup 命令で
+  device.pushErrorScope('validation');                // 下で作るシェーダ・パイプラインの検証エラーを集める
+  const info = adapter.info || {};
+  const SG = device.features.has('subgroups') && info.subgroupMinSize === 32 && info.subgroupMaxSize === 32;
+  const hasTs = device.features.has('timestamp-query');
+
+  const U = GPUBufferUsage;
+  const mkBuf = (size, usage) => device.createBuffer({ size: Math.max(16, Math.ceil(size / 16) * 16), usage });
+  const typeBuf = mkBuf(MAX_COUNT * 4, U.STORAGE | U.COPY_DST);           // 描画と計算で共用
+  const typeIo = new Uint32Array(MAX_COUNT);
+
+  /* ---------------- 描画 ---------------- */
+  const xBuf = mkBuf(MAX_COUNT * 4, U.STORAGE | U.COPY_DST);              // CPU 計算中の位置
+  const yBuf = mkBuf(MAX_COUNT * 4, U.STORAGE | U.COPY_DST);
+  const ruBuf = mkBuf(32, U.UNIFORM | U.COPY_DST);                         // world, half, alpha, mode
+  const colBuf = mkBuf(MAX_TYPES * 16, U.UNIFORM | U.COPY_DST);
+  const fadeBuf = [mkBuf(16, U.UNIFORM | U.COPY_DST), mkBuf(16, U.UNIFORM | U.COPY_DST)];
+  // 点の描き方は WebGL 版 (ANGLE が点を四角形に広げる方法) にそろえる: 上下を反転した座標で描き
+  // (最後に反転して表示)、四隅の順番・頂点の座標・指数関数の計算も同じ。こうすると頂点が 1/256 画素の
+  // 格子に寄るときの丸めまで一致し、WebGL 版とほぼ同じ画素値になる (違いは 100k 粒子で 1/255 が十数画素)
+  const drawSrc = `
+    struct RU { world: vec2f, half: vec2f, alpha: f32, mode: u32, p0: u32, p1: u32 };
+    @group(0) @binding(0) var<uniform> ru: RU;
+    @group(0) @binding(1) var<uniform> colors: array<vec4f, ${MAX_TYPES}>;
+    @group(0) @binding(2) var<storage, read> st: array<vec4f>;
+    @group(0) @binding(3) var<storage, read> xs: array<f32>;
+    @group(0) @binding(4) var<storage, read> ys: array<f32>;
+    @group(0) @binding(5) var<storage, read> ty: array<u32>;
+    struct VO { @builtin(position) pos: vec4f, @location(0) p: vec2f, @location(1) @interpolate(flat) col: vec3f };
+    @vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VO {
+      var a: vec2f;
+      if (ru.mode == 1u) { a = st[ii].xy; } else { a = vec2f(xs[ii], ys[ii]); }
+      let clip = a / ru.world * 2.0 - 1.0;
+      // 四隅: (+,-) (+,+) (-,-) (-,+) の順 (ANGLE と同じ。対角線の向きもそろう)
+      let c = vec2f(select(-1.0, 1.0, vi < 2u), select(-1.0, 1.0, (vi & 1u) == 1u));
+      var o: VO;
+      o.pos = vec4f(clip.x + c.x * ru.half.x, clip.y + c.y * ru.half.y, 0.0, 1.0);   // 上下反転した座標
+      o.p = vec2f(c.x * 0.5 + 0.5, 0.5 - c.y * 0.5);   // gl_PointCoord と同じ (0..1)
+      o.col = colors[ty[ii]].xyz;
+      return o;
+    }
+    @fragment fn fs(i: VO) -> @location(0) vec4f {
+      let p = i.p * 2.0 - 1.0;
+      let d2 = dot(p, p);
+      if (d2 > 1.0) { discard; }
+      // 明るい芯 + 柔らかい外周 (WebGL 版と同じ式。exp(-5 d2) = exp2(d2 × -5 log2 e))
+      let glow = fma(1.0 - d2, 0.15, exp2(d2 * -7.213475204444817));
+      return vec4f(i.col * glow * ru.alpha, 1.0);
+    }
+    @group(0) @binding(0) var<uniform> fadeColor: vec4f;
+    @vertex fn vsq(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+      return vec4f(f32(vi & 1u) * 2.0 - 1.0, f32(vi >> 1u) * 2.0 - 1.0, 0.0, 1.0);
+    }
+    @fragment fn fsq() -> @location(0) vec4f { return fadeColor; }
+    @group(0) @binding(0) var src: texture_2d<f32>;
+    // 残像テクスチャは上下反転して持っているので、表示するときに戻す
+    @fragment fn fsb(@builtin(position) p: vec4f) -> @location(0) vec4f {
+      let h = i32(textureDimensions(src).y);
+      return textureLoad(src, vec2i(i32(p.x), h - 1 - i32(p.y)), 0);
+    }`;
+  // 1つのモジュールに入れると binding 0 が重なるので、点・フェード・表示は別モジュールにする
+  const pointModule = device.createShaderModule({ code: drawSrc.slice(0, drawSrc.indexOf('@group(0) @binding(0) var<uniform> fadeColor')) });
+  const fadeModule = device.createShaderModule({ code: drawSrc.slice(drawSrc.indexOf('@group(0) @binding(0) var<uniform> fadeColor'), drawSrc.indexOf('@group(0) @binding(0) var src')) });
+  const blitModule = device.createShaderModule({ code: drawSrc.slice(drawSrc.indexOf('@vertex fn vsq'), drawSrc.indexOf('@fragment fn fsq')) + drawSrc.slice(drawSrc.indexOf('@group(0) @binding(0) var src')) });
+  const blend = (src, dst, op) => ({ color: { srcFactor: src, dstFactor: dst, operation: op }, alpha: { srcFactor: src, dstFactor: dst, operation: op } });
+  const strip = { topology: 'triangle-strip' };
+  const pointPipe = device.createRenderPipeline({
+    layout: 'auto', primitive: strip,
+    vertex: { module: pointModule, entryPoint: 'vs' },
+    fragment: { module: pointModule, entryPoint: 'fs', targets: [{ format: FORMAT, blend: blend('one', 'one', 'add') }] },
+  });
+  const fadePipe = (b) => device.createRenderPipeline({
+    layout: 'auto', primitive: strip,
+    vertex: { module: fadeModule, entryPoint: 'vsq' },
+    fragment: { module: fadeModule, entryPoint: 'fsq', targets: [{ format: FORMAT, blend: b }] },
+  });
+  const blitPipe = device.createRenderPipeline({
+    layout: 'auto', primitive: strip,
+    vertex: { module: blitModule, entryPoint: 'vsq' },
+    fragment: { module: blitModule, entryPoint: 'fsb', targets: [{ format: FORMAT }] },
+  });
+  let blitBG = null;
+  const fadeMulPipe = fadePipe(blend('zero', 'one-minus-src-alpha', 'add'));          // dst *= (1 - fade)
+  const fadeSubPipe = fadePipe(blend('one', 'one', 'reverse-subtract'));              // dst -= floor
+  const fadeBG = fadeBuf.map((b, i) => device.createBindGroup({
+    layout: (i ? fadeSubPipe : fadeMulPipe).getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: b } }],
+  }));
+  let trail = null;               // 残像を保持するテクスチャ (キャンバスと同じ大きさ)
+  let dpr = 1, pxW = 1, pxH = 1;
+  const ruIo = new ArrayBuffer(32), ruF = new Float32Array(ruIo), ruU = new Uint32Array(ruIo);
+  const colIo = new Float32Array(MAX_TYPES * 4);
+  const fadeIo = new Float32Array(4);
+  let pointBG = null;             // 計算エンジンの状態バッファができてから作る
+
+  /* ---------------- GPU 計算 ---------------- */
+  const SUBY = 10, SUBX = 40;               // 近傍用の格子: rMax の 1/10 (行) × 1/40 (列)
+  const MAX_CELLS = 2048 * 1024 - 1;        // 累積和: 1 ブロック 1024 個 × 最大 2048 ブロック
+  const MAXQ = 96;                          // 32 行ぶん × 行あたり最大 3 区間 (画面の端の折り返し)
+  const stateBuf = mkBuf(MAX_COUNT * 16, U.STORAGE | U.COPY_DST | U.COPY_SRC);    // x, y, vx, vy (粒子番号順)
+  const krN = mkBuf(MAX_COUNT * 8, U.STORAGE), krH = mkBuf(MAX_COUNT * 8, U.STORAGE);
+  const countsN = mkBuf((MAX_CELLS + 1) * 4, U.STORAGE | U.COPY_DST);
+  const countsH = mkBuf((MAX_CELLS + 1) * 4, U.STORAGE | U.COPY_DST);
+  const blkN = mkBuf(2048 * 4, U.STORAGE), blkH = mkBuf(2048 * 4, U.STORAGE);
+  const sortedN = mkBuf(MAX_COUNT * 8, U.STORAGE), sortedH = mkBuf(MAX_COUNT * 16, U.STORAGE);
+  const uni = mkBuf(112, U.UNIFORM | U.COPY_DST);
+  const suN = mkBuf(16, U.UNIFORM | U.COPY_DST), suH = mkBuf(16, U.UNIFORM | U.COPY_DST);
+  const pairBuf = mkBuf(MAX_TYPES * MAX_TYPES * 16, U.STORAGE | U.COPY_DST);   // 色の組ごと: m, 1/RB, 山の位置, 1/半幅
+  const readBuf = mkBuf(MAX_COUNT * 16, U.MAP_READ | U.COPY_DST);
+  let qs = null, qBuf = null, qRead = null;
+  if (hasTs) {
+    qs = device.createQuerySet({ type: 'timestamp', count: 2 });
+    qBuf = mkBuf(16, U.QUERY_RESOLVE | U.COPY_SRC);
+    qRead = mkBuf(16, U.MAP_READ | U.COPY_DST);
+  }
+  const UNI = `
+    struct U {
+      world: vec2f, cell: vec2f,
+      cols: u32, rows: u32, n: u32, nT: u32,
+      rMax: f32, p0: f32, friction: f32, accScale: f32,
+      dt: f32, pr: f32, pf: f32, inputOn: u32,
+      inp: vec2f, hg: f32, p1: u32,
+      hgx: u32, hgy: u32, p2: u32, p3: u32,
+      scale: vec2f, p4: u32, p5: u32,
+    };
+    @group(0) @binding(0) var<uniform> u: U;`;
+  const SU = `
+    struct SU { total: u32, nBlocks: u32, p0: u32, p1: u32 };
+    @group(0) @binding(0) var<uniform> su: SU;`;
+  const keySrc = UNI + `
+    @group(0) @binding(1) var<storage, read> state: array<vec4f>;
+    @group(0) @binding(2) var<storage, read> types: array<u32>;
+    @group(0) @binding(3) var<storage, read_write> cN: array<atomic<u32>>;
+    @group(0) @binding(4) var<storage, read_write> cH: array<atomic<u32>>;
+    @group(0) @binding(5) var<storage, read_write> krN: array<vec2u>;
+    @group(0) @binding(6) var<storage, read_write> krH: array<vec2u>;
+    // ヒルベルト曲線上の番号 (n は 2 のべき)。Z 順より飛びが少なく、連続 32 粒子の広がりが小さい
+    fn hilbert(x0: u32, y0: u32, n: u32) -> u32 {
+      var x = x0; var y = y0; var d = 0u;
+      for (var s = n >> 1u; s > 0u; s >>= 1u) {
+        let rx = select(0u, 1u, (x & s) != 0u);
+        let ry = select(0u, 1u, (y & s) != 0u);
+        d += s * s * ((3u * rx) ^ ry);
+        if (ry == 0u) {
+          if (rx == 1u) { x = n - 1u - x; y = n - 1u - y; }
+          let tmp = x; x = y; y = tmp;
+        }
+      }
+      return d;
+    }
+    @compute @workgroup_size(256)
+    fn main(@builtin(global_invocation_id) g: vec3u) {
+      let i = g.x;
+      if (i >= u.n) { return; }
+      let p = state[i].xy;
+      let cx = min(u32(p.x / u.cell.x), u.cols - 1u);
+      let cy = min(u32(p.y / u.cell.y), u.rows - 1u);
+      let kN = (cy * u.nT + types[i]) * u.cols + cx;
+      krN[i] = vec2u(kN, atomicAdd(&cN[kN], 1u));
+      let hx = min(u32(p.x / u.hg), u.hgx - 1u);
+      let hy = min(u32(p.y / u.hg), u.hgy - 1u);
+      let kH = hilbert(hx, hy, u.p2);
+      krH[i] = vec2u(kH, atomicAdd(&cH[kH], 1u));
+    }`;
+  const scanASrc = SU + `
+    @group(0) @binding(1) var<storage, read_write> cnt: array<u32>;
+    @group(0) @binding(2) var<storage, read_write> blk: array<u32>;
+    var<workgroup> sh: array<u32, 256>;
+    @compute @workgroup_size(256)
+    fn main(@builtin(workgroup_id) w: vec3u, @builtin(local_invocation_index) t: u32) {
+      let base = w.x * 1024u + t * 4u;
+      var v: array<u32, 4>;
+      var s = 0u;
+      for (var q = 0u; q < 4u; q++) {
+        let idx = base + q;
+        var c = 0u;
+        if (idx < su.total) { c = cnt[idx]; }
+        v[q] = s; s += c;
+      }
+      sh[t] = s;
+      workgroupBarrier();
+      for (var off = 1u; off < 256u; off <<= 1u) {
+        var add = 0u;
+        if (t >= off) { add = sh[t - off]; }
+        workgroupBarrier();
+        sh[t] += add;
+        workgroupBarrier();
+      }
+      let ex = sh[t] - s;
+      for (var q = 0u; q < 4u; q++) { let idx = base + q; if (idx < su.total) { cnt[idx] = v[q] + ex; } }
+      if (t == 255u) { blk[w.x] = sh[255]; }
+    }`;
+  const scanBSrc = SU + `
+    @group(0) @binding(1) var<storage, read_write> blk: array<u32>;
+    var<workgroup> sh: array<u32, 256>;
+    @compute @workgroup_size(256)
+    fn main(@builtin(local_invocation_index) t: u32) {
+      let base = t * 8u;
+      var v: array<u32, 8>;
+      var s = 0u;
+      for (var q = 0u; q < 8u; q++) {
+        let idx = base + q;
+        var c = 0u;
+        if (idx < su.nBlocks) { c = blk[idx]; }
+        v[q] = s; s += c;
+      }
+      sh[t] = s;
+      workgroupBarrier();
+      for (var off = 1u; off < 256u; off <<= 1u) {
+        var add = 0u;
+        if (t >= off) { add = sh[t - off]; }
+        workgroupBarrier();
+        sh[t] += add;
+        workgroupBarrier();
+      }
+      let ex = sh[t] - s;
+      for (var q = 0u; q < 8u; q++) { let idx = base + q; if (idx < su.nBlocks) { blk[idx] = v[q] + ex; } }
+    }`;
+  const scanCSrc = SU + `
+    @group(0) @binding(1) var<storage, read_write> cnt: array<u32>;
+    @group(0) @binding(2) var<storage, read> blk: array<u32>;
+    @compute @workgroup_size(256)
+    fn main(@builtin(workgroup_id) w: vec3u, @builtin(local_invocation_index) t: u32) {
+      let off = blk[w.x];
+      for (var q = 0u; q < 4u; q++) {
+        let idx = w.x * 1024u + q * 256u + t;
+        if (idx < su.total) { cnt[idx] += off; }
+      }
+    }`;
+  const scatterSrc = UNI + `
+    @group(0) @binding(1) var<storage, read> state: array<vec4f>;
+    @group(0) @binding(2) var<storage, read> types: array<u32>;
+    @group(0) @binding(3) var<storage, read> krN: array<vec2u>;
+    @group(0) @binding(4) var<storage, read> krH: array<vec2u>;
+    @group(0) @binding(5) var<storage, read> sN: array<u32>;
+    @group(0) @binding(6) var<storage, read> sH: array<u32>;
+    @group(0) @binding(7) var<storage, read_write> sortedN: array<vec2f>;
+    @group(0) @binding(8) var<storage, read_write> sortedH: array<vec4u>;   // 位置 (ビット列), 色, 粒子番号
+    @compute @workgroup_size(256)
+    fn main(@builtin(global_invocation_id) g: vec3u) {
+      let i = g.x;
+      if (i >= u.n) { return; }
+      let p = state[i].xy;
+      let a = krN[i]; sortedN[sN[a.x] + a.y] = p;
+      let b = krH[i]; sortedH[sH[b.x] + b.y] = vec4u(bitcast<vec2u>(p), types[i], i);
+    }`;
+  const scaleSrc = UNI + `
+    @group(0) @binding(1) var<storage, read_write> state: array<vec4f>;
+    @compute @workgroup_size(256)
+    fn main(@builtin(global_invocation_id) g: vec3u) {
+      let i = g.x;
+      if (i >= u.n) { return; }
+      let st = state[i];
+      state[i] = vec4f(min(st.xy * u.scale, u.world - 1e-3), st.zw);   // CPU 版の resize と同じ式
+    }`;
+  // 近傍1個ぶん: k = m·sat(1 - |r - 山| / 半幅) - sat(1 - r / RB)。
+  // 引力の三角形は反発距離〜rMax の外で、反発は RB の外で自然に 0 (sat は FMA の無料の修飾子)。
+  // t = r - 山 を FMA 1 回で作り (r = d2 / |d|)、反発も t から作る: 1 - r/RB = (1 - 山/RB) - t/RB。
+  // 自分自身 (d = 0) は d2 に 1e-30 を足して有限にし、d × 有限 = 0 になる
+  const ACC = (b) => `{
+                let d = ${b} - pa; let d2 = fma(d.x, d.x, fma(d.y, d.y, 1e-30));
+                let invD = inverseSqrt(d2);
+                let t = fma(d2, invD, -pp.z);
+                let k = fma(pp.x, saturate(fma(-abs(t), pp.w, 1.0)), -saturate(fma(-t, pp.y, ppc)));
+                f += d * (k * invD); }`;
+  const INNER = Array.from({ length: 32 }, (_, k) => `{ let q = tile[${k}]; ${ACC('q.xy')} ${ACC('q.zw')} }`).join('\n');
+  const INNER_H = Array.from({ length: 8 }, (_, k) => `{ let q = tile[${k}]; ${ACC('q.xy')} ${ACC('q.zw')} }`).join('\n');
+  const forceSrc = (SG ? 'enable subgroups;\n' : '') + UNI + `
+    @group(0) @binding(1) var<storage, read_write> state: array<vec4f>;
+    @group(0) @binding(2) var<storage, read> sortedH: array<vec4u>;
+    @group(0) @binding(3) var<storage, read> sortedN: array<vec2f>;
+    @group(0) @binding(4) var<storage, read> startN: array<u32>;
+    @group(0) @binding(5) var<storage, read> P: array<vec4f>;
+    const MAXQ = ${MAXQ}u;
+    // 共有メモリは少ないほど 1 つの SM に多くのグループが載る (待ち時間を隠せる)。
+    // subgroup があれば、各レーンの行の区間はレジスタに置き、共有するのはタイル・位置・詰めた表だけ
+    var<workgroup> tile: array<vec4f, 32>;          // 近傍 64 個 (2 個ずつ)
+    var<workgroup> hp: array<vec2f, 32>;            // 担当 32 粒子の位置
+    var<workgroup> bbU: array<f32, 2>;
+    // 色ごとの「空でない区間」を詰めた表: (読み出し位置 - 区間の先頭番号, 区間の終わり, ずらし x, y のビット列)
+    var<workgroup> cA: array<vec4u, MAXQ>;
+    var<workgroup> totU: u32;${SG ? '' : `
+    var<workgroup> bbA: array<atomic<u32>, 2>;
+    var<workgroup> qLen: array<u32, MAXQ>;          // (subgroup なしのとき) 区間の長さ・先頭番号・ずらし
+    var<workgroup> qS0: array<u32, MAXQ>;
+    var<workgroup> qOff: array<vec2f, MAXQ>;`}
+    fn fdiv(a: i32, b: i32) -> i32 {
+      var q = a / b;
+      if ((a % b != 0) && ((a < 0) != (b < 0))) { q -= 1; }
+      return q;
+    }
+    // トーラスで回り込み: CPU 版と同じく、負なら幅を足し、幅以上なら引いて範囲内へ。
+    // 1ステップで1周以上動いた (極端な設定の) ときは、繰り返す代わりに剰余で戻す
+    fn wrapAxis(x0: f32, w: f32) -> f32 {
+      var x = x0;
+      if (x < 0.0) {
+        x += w;
+        if (x < 0.0) { x = clamp(x - floor(x / w) * w, 0.0, w); }
+      } else if (x >= w) {
+        x -= w;
+        if (x >= w) { x = clamp(x - floor(x / w) * w, 0.0, w); }
+      }
+      return x;
+    }
+    // 色別の区間を連結した列の g 番目の近傍 (折り返しのずらし込み)。範囲外は遠方のダミー (力 0)。
+    // 今いる区間 (cv) をレジスタに持ち、区間の終わりを越えたときだけ次の区間を読む
+    fn fetchN(g: u32, T: u32, ci: ptr<function, u32>, cv: ptr<function, vec4u>) -> vec2f {
+      if (g >= T) { return vec2f(1e18, 1e18); }
+      while (g >= (*cv).y) { *ci += 1u; *cv = cA[*ci]; }
+      return sortedN[(*cv).x + g] + bitcast<vec2f>((*cv).zw);
+    }
+    @compute @workgroup_size(32)
+    fn main(@builtin(workgroup_id) w: vec3u, @builtin(local_invocation_index) t: u32) {
+      let wid = w.y * 65535u + w.x;
+      if (wid * 32u >= u.n) { return; }
+      let s = wid * 32u + t;
+      let live = s < u.n;
+      var me = vec4f(0.0);
+      hp[t] = vec2f(-1.0, -1.0);
+      var meT = 0u; var meI = 0u;                    // 色・粒子番号
+      if (live) { let raw = sortedH[s]; me = vec4f(bitcast<vec2f>(raw.xy), 0.0, 0.0); meT = raw.z; meI = raw.w; hp[t] = me.xy; }
+      ${SG ? `
+      let yLo = subgroupMin(select(1e30, me.y, live)); let yHi = subgroupMax(select(-1e30, me.y, live));
+      if (t == 0u) { bbU = array<f32, 2>(yLo, yHi); }` : `
+      if (t == 0u) { atomicStore(&bbA[0], 0xffffffffu); atomicStore(&bbA[1], 0u); }
+      workgroupBarrier();
+      if (live) {
+        let by = bitcast<u32>(me.y) & 0x7fffffffu;    // 非負の浮動小数はビット列の大小 = 値の大小
+        atomicMin(&bbA[0], by); atomicMax(&bbA[1], by);
+      }
+      workgroupBarrier();
+      if (t == 0u) { bbU = array<f32, 2>(bitcast<f32>(atomicLoad(&bbA[0])), bitcast<f32>(atomicLoad(&bbA[1]))); }`}
+      let bb = workgroupUniformLoad(&bbU);             // 位置 hp もここで全員に見える
+      let y0 = bb[0]; let y1 = bb[1];
+      let nT = u.nT;
+      let rowA = meT * nT;
+      let reach = u.rMax + 1e-3 + max(u.world.x, u.world.y) * 2e-7;   // 境界の丸め誤差ぶん少し広めに
+      let cw = u.cell.x; let ch = u.cell.y;
+      let cols = i32(u.cols); let rows = i32(u.rows);
+      let pa = me.xy;
+      var f = vec2f(0.0);
+      let rowLo = i32(floor((y0 - reach) / ch)); let rowHi = i32(floor((y1 + reach) / ch));
+      for (var rb = rowLo; rb <= rowHi; rb += 32) {
+        // レーン t が行 rb + t の区間を作る: 届く x の範囲 = 各粒子の円の弦の和集合
+        let j = rb + i32(t);
+        var sA = array<vec2u, 3>(vec2u(1u, 0u), vec2u(1u, 0u), vec2u(1u, 0u));   // この行の区間: 列の範囲 [a0, a1)
+        var sOff = array<vec2f, 3>();                                             // 折り返しのずらし
+        var sNy = 0u;                                                             // 行 × 色数
+        if (j <= rowHi) {
+          var xlo = 1e30; var xhi = -1e30;
+          for (var q = 0u; q < 32u; q++) {
+            let h = hp[q];
+            if (h.x < 0.0) { continue; }
+            let gq = max(0.0, max(f32(j) * ch - h.y, h.y - f32(j + 1) * ch));
+            if (gq < reach) { let c = sqrt(reach * reach - gq * gq); xlo = min(xlo, h.x - c); xhi = max(xhi, h.x + c); }
+          }
+          if (xlo <= xhi) {
+            let ky = fdiv(j, rows); let ny = j - ky * rows;
+            let offY = f32(ky) * u.world.y;
+            let ca = i32(floor(xlo / cw)); let cb = i32(floor(xhi / cw));
+            let kLo = fdiv(ca, cols); let kHi = min(fdiv(cb, cols), kLo + 2);
+            sNy = u32(ny) * nT;
+            for (var k = kLo; k <= kHi; k++) {
+              let q = u32(k - kLo);
+              let a0 = max(ca, k * cols) - k * cols; let a1 = min(cb, k * cols + cols - 1) - k * cols;
+              sA[q] = vec2u(u32(a0), u32(a1 + 1)); sOff[q] = vec2f(f32(k) * u.world.x, offY);
+            }
+          }
+        }
+        for (var tb = 0u; tb < nT; tb++) {
+          // 色 tb の区間の長さと接頭和
+          var lens = array<u32, 3>();
+          var sts = array<u32, 3>();
+          var mySum = 0u; var myCnt = 0u;
+          for (var q = 0u; q < 3u; q++) {
+            let a = sA[q];
+            if (a.x < a.y) {
+              let base = (sNy + tb) * u.cols;
+              let st = startN[base + a.x];
+              lens[q] = startN[base + a.y] - st; sts[q] = st;
+            }
+            mySum += lens[q]; myCnt += select(0u, 1u, lens[q] > 0u);
+          }
+          ${SG ? `
+          var acc = subgroupExclusiveAdd(mySum);
+          var wi = subgroupExclusiveAdd(myCnt);
+          for (var q = 0u; q < 3u; q++) {
+            if (lens[q] > 0u) { cA[wi] = vec4u(sts[q] - acc, acc + lens[q], bitcast<vec2u>(sOff[q])); wi++; }
+            acc += lens[q];
+          }
+          let tot = subgroupAdd(mySum);
+          if (t == 0u) { totU = tot; }` : `
+          for (var q = 0u; q < 3u; q++) { qLen[t * 3u + q] = lens[q]; qS0[t * 3u + q] = sts[q]; qOff[t * 3u + q] = sOff[q]; }
+          workgroupBarrier();
+          if (t == 0u) {
+            var acc = 0u; var wi = 0u;
+            for (var q = 0u; q < MAXQ; q++) {
+              let L = qLen[q];
+              if (L > 0u) { cA[wi] = vec4u(qS0[q] - acc, acc + L, bitcast<vec2u>(qOff[q])); wi++; }
+              acc += L;
+            }
+            totU = acc;
+          }`}
+          let T = workgroupUniformLoad(&totU);
+          let pp = P[rowA + tb];                    // この色の組の係数・距離 (色ごとに1回)
+          let ppc = 1.0 - pp.z * pp.y;
+          var ci = 0u; var cv = vec4u(0u);
+          if (T > 0u) { cv = cA[0]; }
+          for (var base = 0u; base < T; base += 64u) {
+            tile[t] = vec4f(fetchN(base + t * 2u, T, &ci, &cv), fetchN(base + t * 2u + 1u, T, &ci, &cv));
+            workgroupBarrier();
+            if (live) {
+              if (T - base > 16u) {
+                ${INNER}
+              } else {                                // 最後の半端なタイル: 前半だけ
+                ${INNER_H}
+              }
+            }
+            workgroupBarrier();
+          }
+        }
+      }
+      if (!live) { return; }
+      let idx = meI;
+      let st = state[idx];
+      var v = st.zw * u.friction + f * u.accScale;
+      if (u.inputOn != 0u) {                          // 「破壊」
+        var d = st.xy - u.inp;
+        let hw = u.world * 0.5;
+        if (d.x > hw.x) { d.x -= u.world.x; } else if (d.x < -hw.x) { d.x += u.world.x; }
+        if (d.y > hw.y) { d.y -= u.world.y; } else if (d.y < -hw.y) { d.y += u.world.y; }
+        let d2 = dot(d, d);
+        if (d2 < u.pr * u.pr && d2 > 1e-6) {
+          let dist = sqrt(d2);
+          v += d * ((1.0 - dist / u.pr) * u.pf * u.dt / dist);
+        }
+      }
+      var p = st.xy + v * u.dt;
+      p.x = wrapAxis(p.x, u.world.x);
+      p.y = wrapAxis(p.y, u.world.y);
+      state[idx] = vec4f(p, v);
+    }`;
+  const mkComp = (code, label) => device.createComputePipeline({
+    layout: 'auto', label, compute: { module: device.createShaderModule({ code, label }), entryPoint: 'main' },
+  });
+  const CP = {
+    key: mkComp(keySrc, 'key'), scanA: mkComp(scanASrc, 'scanA'), scanB: mkComp(scanBSrc, 'scanB'), scanC: mkComp(scanCSrc, 'scanC'),
+    scatter: mkComp(scatterSrc, 'scatter'), force: mkComp(forceSrc, 'force'), scale: mkComp(scaleSrc, 'scale'),
+  };
+  const bindAll = (p, list) => device.createBindGroup({
+    layout: p.getBindGroupLayout(0), entries: list.map((b, i) => ({ binding: i, resource: { buffer: b } })),
+  });
+  const BG = {
+    key: bindAll(CP.key, [uni, stateBuf, typeBuf, countsN, countsH, krN, krH]),
+    scanAN: bindAll(CP.scanA, [suN, countsN, blkN]), scanBN: bindAll(CP.scanB, [suN, blkN]), scanCN: bindAll(CP.scanC, [suN, countsN, blkN]),
+    scanAH: bindAll(CP.scanA, [suH, countsH, blkH]), scanBH: bindAll(CP.scanB, [suH, blkH]), scanCH: bindAll(CP.scanC, [suH, countsH, blkH]),
+    scatter: bindAll(CP.scatter, [uni, stateBuf, typeBuf, krN, krH, countsN, countsH, sortedN, sortedH]),
+    force: bindAll(CP.force, [uni, stateBuf, sortedH, sortedN, countsN, pairBuf]),
+    scale: bindAll(CP.scale, [uni, stateBuf]),
+  };
+  pointBG = bindAll(pointPipe, [ruBuf, colBuf, stateBuf, xBuf, yBuf, typeBuf]);
+
+  const uniIo = new ArrayBuffer(112), uF = new Float32Array(uniIo), uU = new Uint32Array(uniIo);
+  const suIo = new Uint32Array(4);
+  const pairIo = new Float32Array(MAX_TYPES * MAX_TYPES * 4);
+  let cols = 1, rows = 1, cw = 1, ch = 1, hg = 1, hgx = 1, hgy = 1, hN = 1;
+  const part1by1 = (v) => { v &= 0xffff; v = (v | (v << 8)) & 0x00ff00ff; v = (v | (v << 4)) & 0x0f0f0f0f; v = (v | (v << 2)) & 0x33333333; v = (v | (v << 1)) & 0x55555555; return v >>> 0; };
+  /** 格子の寸法 (セル数が上限を超える巨大な画面では粗くする) */
+  function grid() {
+    hg = Math.max(1, Math.max(worldW, worldH) / 1024);       // 並べ順 (ヒルベルト曲線) の格子は 1024×1024 以下
+    hgx = Math.max(1, Math.ceil(worldW / hg)); hgy = Math.max(1, Math.ceil(worldH / hg));
+    hN = 1; while (hN < Math.max(hgx, hgy)) hN *= 2;          // ヒルベルト曲線の一辺 (2 のべき)
+    for (let k = 0; k < 8; k++) {
+      const sy = Math.max(1, SUBY >> k), sx = Math.max(1, SUBX >> k);
+      const c = Math.max(1, Math.floor(worldW * sx / params.rMax)), r = Math.max(1, Math.floor(worldH * sy / params.rMax));
+      if (c * r * numTypes <= MAX_CELLS) { cols = c; rows = r; cw = worldW / c; ch = worldH / r; return true; }
+    }
+    return false;
+  }
+  function writeUniforms(dt, friction, accScale, n) {
+    uF[0] = worldW; uF[1] = worldH; uF[2] = cw; uF[3] = ch;
+    uU[4] = cols; uU[5] = rows; uU[6] = n; uU[7] = numTypes;
+    uF[8] = params.rMax; uF[10] = friction; uF[11] = accScale;
+    uF[12] = dt; uF[13] = params.pointerRadius; uF[14] = params.pointerForce; uU[15] = input.active ? 1 : 0;
+    uF[16] = input.x; uF[17] = input.y; uF[18] = hg;
+    uU[20] = hgx; uU[21] = hgy; uU[22] = hN;
+    device.queue.writeBuffer(uni, 0, uniIo);
+  }
+  let active = false, enterCount = 0, exiting = false;
+  let stepNo = 0, tsPending = false, gpuMs = 0;
+  const stIo = new Float32Array(MAX_COUNT * 4);
+  const sim = {
+    get active() { return active; },
+    get enterCount() { return enterCount; },
+    /** GPU → CPU の読み戻し中 (この間はシミュレーションを進めない) */
+    get busy() { return exiting; },
+    /** 直近に測った GPU 計算時間 [ms] (測れない環境では 0) */
+    get gpuMs() { return gpuMs; },
+    get drawInfo() { return { gpuMs, cols, rows, sg: SG }; },
+    texW: 0,
+    fits() { return grid(); },
+    /** 粒子 [from, to) を CPU 側の配列から GPU に送る (位置・速度・色) */
+    uploadRange(from, to) {
+      if (to <= from) return;
+      for (let i = from; i < to; i++) {
+        stIo[i * 4] = posX[i]; stIo[i * 4 + 1] = posY[i]; stIo[i * 4 + 2] = velX[i]; stIo[i * 4 + 3] = velY[i];
+        typeIo[i] = type[i];
+      }
+      device.queue.writeBuffer(stateBuf, from * 16, stIo, from * 4, (to - from) * 4);
+      device.queue.writeBuffer(typeBuf, from * 4, typeIo, from, to - from);
+      simVersion++;
+    },
+    /** 色だけ送り直す (色の数を変えたとき。位置は GPU 上のまま) */
+    uploadTypes(from, to) {
+      for (let i = from; i < to; i++) typeIo[i] = type[i];
+      device.queue.writeBuffer(typeBuf, from * 4, typeIo, from, to - from);
+      simVersion++;
+    },
+    enter() {
+      if (active || exiting || !grid()) return;
+      sim.uploadRange(0, params.count);
+      active = true; enterCount = params.count;
+    },
+    /** CPU 計算に戻る: 状態を読み戻してから切り替える (非同期。終わるまで busy) */
+    exit() {
+      if (!active || exiting) return;
+      exiting = true;
+      const n = params.count, w0 = worldW, h0 = worldH;
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(stateBuf, 0, readBuf, 0, n * 16);
+      device.queue.submit([enc.finish()]);
+      readBuf.mapAsync(GPUMapMode.READ, 0, n * 16).then(() => {
+        const a = new Float32Array(readBuf.getMappedRange(0, n * 16));
+        for (let i = 0; i < n; i++) { posX[i] = a[i * 4]; posY[i] = a[i * 4 + 1]; velX[i] = a[i * 4 + 2]; velY[i] = a[i * 4 + 3]; }
+        readBuf.unmap();
+        if (worldW !== w0 || worldH !== h0) {         // 読み戻しの間に画面サイズが変わった: CPU 版の resize と同じ式で合わせる
+          const sx = worldW / w0, sy = worldH / h0;
+          for (let i = 0; i < n; i++) { posX[i] = Math.min(posX[i] * sx, worldW - 1e-3); posY[i] = Math.min(posY[i] * sy, worldH - 1e-3); }
+        }
+        active = false; exiting = false;
+        simVersion++; idleFrames = 0;
+        refreshEngineLabel();
+      }, (e) => { console.warn('GPU からの読み戻しに失敗:', e); exiting = false; });
+    },
+    rescale(sx, sy) {
+      uF[24] = sx; uF[25] = sy;
+      writeUniforms(0, 1, 0, params.count);
+      const enc = device.createCommandEncoder();
+      const p = enc.beginComputePass();
+      p.setPipeline(CP.scale); p.setBindGroup(0, BG.scale); p.dispatchWorkgroups(Math.ceil(params.count / 256));
+      p.end();
+      device.queue.submit([enc.finish()]);
+      simVersion++;
+    },
+    noteFrameMs() {},
+    /** 1 ステップ進める。measure = true のときはこのステップの GPU 時間 [ms] を返す (計測用) */
+    step(dt, friction, accScale, measure = false) {
+      if (!grid()) return;
+      const n = params.count, nT = numTypes;
+      const nCellsN = cols * rows * nT, nCellsH = hN * hN;
+      writeUniforms(dt, friction, accScale, n);
+      const nbN = Math.ceil((nCellsN + 1) / 1024), nbH = Math.ceil((nCellsH + 1) / 1024);
+      suIo[0] = nCellsN + 1; suIo[1] = nbN; device.queue.writeBuffer(suN, 0, suIo);
+      suIo[0] = nCellsH + 1; suIo[1] = nbH; device.queue.writeBuffer(suH, 0, suIo);
+      // 色の組ごとの定数: m, 1/(R·β), 山の位置 R(1+β)/2, 1/半幅 2/(R(1-β))  (R, β は組ごとの影響範囲)
+      for (let k = 0; k < nT * nT; k++) {
+        const R = params.rMax * pairMax[k], b = pairMin[k];
+        pairIo[k * 4] = matrix[k]; pairIo[k * 4 + 1] = 1 / (R * b);
+        pairIo[k * 4 + 2] = R * (1 + b) * 0.5; pairIo[k * 4 + 3] = 2 / (R * (1 - b));
+      }
+      device.queue.writeBuffer(pairBuf, 0, pairIo, 0, nT * nT * 4);
+      const timed = hasTs && !tsPending && (measure || stepNo++ % 30 === 0);
+      const enc = device.createCommandEncoder();
+      enc.clearBuffer(countsN, 0, Math.ceil((nCellsN + 1) / 4) * 16);
+      enc.clearBuffer(countsH, 0, Math.ceil((nCellsH + 1) / 4) * 16);
+      const p = enc.beginComputePass(timed ? { timestampWrites: { querySet: qs, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } } : undefined);
+      const g256 = Math.ceil(n / 256);
+      p.setPipeline(CP.key); p.setBindGroup(0, BG.key); p.dispatchWorkgroups(g256);
+      p.setPipeline(CP.scanA); p.setBindGroup(0, BG.scanAN); p.dispatchWorkgroups(nbN);
+      p.setBindGroup(0, BG.scanAH); p.dispatchWorkgroups(nbH);
+      p.setPipeline(CP.scanB); p.setBindGroup(0, BG.scanBN); p.dispatchWorkgroups(1);
+      p.setBindGroup(0, BG.scanBH); p.dispatchWorkgroups(1);
+      p.setPipeline(CP.scanC); p.setBindGroup(0, BG.scanCN); p.dispatchWorkgroups(nbN);
+      p.setBindGroup(0, BG.scanCH); p.dispatchWorkgroups(nbH);
+      p.setPipeline(CP.scatter); p.setBindGroup(0, BG.scatter); p.dispatchWorkgroups(g256);
+      const nW = Math.ceil(n / 32);
+      p.setPipeline(CP.force); p.setBindGroup(0, BG.force);
+      p.dispatchWorkgroups(Math.min(nW, 65535), Math.ceil(nW / 65535));
+      p.end();
+      if (timed) {
+        enc.resolveQuerySet(qs, 0, 2, qBuf, 0);
+        enc.copyBufferToBuffer(qBuf, 0, qRead, 0, 16);
+      }
+      device.queue.submit([enc.finish()]);
+      if (timed) {
+        tsPending = true;
+        const pr = qRead.mapAsync(GPUMapMode.READ).then(() => {
+          const ts = new BigInt64Array(qRead.getMappedRange());
+          gpuMs = Number(ts[1] - ts[0]) / 1e6;
+          qRead.unmap(); tsPending = false;
+          return gpuMs;
+        }, () => { tsPending = false; return 0; });
+        if (measure) return pr;
+      }
+    },
+  };
+
+  /* ---------------- 描画 (renderer のインターフェイス) ---------------- */
+  function applyStyle() {
+    const size = Math.fround(params.pointSize * dpr);    // WebGL 版の gl_PointSize と同じ大きさ (px)
+    // 四隅のずらし量 (クリップ座標)。WebGL (ANGLE) が点を四角形に広げるときと同じ順・同じ丸めで計算する
+    // (0.5 × (1 / (画面の半分の大きさ)) × 大きさ)。丸めが違うと頂点が 1/256 画素の格子で別の位置に寄ることがある
+    const f = Math.fround, half = (px) => f(f(0.5 * f(1 / f(px * 0.5))) * size);
+    ruF[2] = half(pxW); ruF[3] = half(pxH); ruF[4] = params.pointAlpha;
+    for (let t = 0; t < MAX_TYPES; t++) {
+      colIo[t * 4] = TYPE_COLORS[t * 3]; colIo[t * 4 + 1] = TYPE_COLORS[t * 3 + 1]; colIo[t * 4 + 2] = TYPE_COLORS[t * 3 + 2];
+    }
+    device.queue.writeBuffer(colBuf, 0, colIo);
+  }
+  const renderer = {
+    name: 'WebGPU',
+    device,
+    applyStyle,
+    resize(w, h, newDpr) {
+      dpr = newDpr;
+      const maxTex = device.limits.maxTextureDimension2D;   // これを超える大きさは作れない (WebGL と同じく縮める)
+      canvas.width = pxW = Math.max(1, Math.min(maxTex, Math.round(w * dpr)));
+      canvas.height = pxH = Math.max(1, Math.min(maxTex, Math.round(h * dpr)));
+      ruF[0] = w; ruF[1] = h;
+      applyStyle();
+      if (trail) trail.destroy();
+      trail = device.createTexture({ size: [pxW, pxH], format: FORMAT, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+      blitBG = device.createBindGroup({ layout: blitPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: trail.createView() }] });
+      const enc = device.createCommandEncoder();          // 黒で塗る (WebGL 版の gl.clear と同じ)
+      enc.beginRenderPass({ colorAttachments: [{ view: trail.createView(), loadOp: 'clear', clearValue: [0, 0, 0, 1], storeOp: 'store' }] }).end();
+      device.queue.submit([enc.finish()]);
+    },
+    onCountChanged(n, from = 0) {
+      if (n <= from) return;                               // 減ったときは送り直さない
+      for (let i = from; i < n; i++) typeIo[i] = type[i];
+      device.queue.writeBuffer(typeBuf, from * 4, typeIo, from, n - from);
+    },
+    draw(n) {
+      if (!trail) return;
+      const onGpu = sim.active;
+      if (!onGpu) {                                         // CPU 計算中: 位置を送る
+        device.queue.writeBuffer(xBuf, 0, posX, 0, n);
+        device.queue.writeBuffer(yBuf, 0, posY, 0, n);
+      }
+      ruU[5] = onGpu ? 1 : 0;
+      device.queue.writeBuffer(ruBuf, 0, ruIo);
+      fadeIo[0] = 0; fadeIo[1] = 0; fadeIo[2] = 0; fadeIo[3] = params.trailFade;
+      device.queue.writeBuffer(fadeBuf[0], 0, fadeIo);
+      fadeIo[0] = TRAIL_FLOOR; fadeIo[1] = TRAIL_FLOOR; fadeIo[2] = TRAIL_FLOOR; fadeIo[3] = 0;
+      device.queue.writeBuffer(fadeBuf[1], 0, fadeIo);
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginRenderPass({ colorAttachments: [{ view: trail.createView(), loadOp: 'load', storeOp: 'store' }] });
+      // 残像: 前フレームを暗くする (乗算) → 少しだけ引く (8bit の残りカス対策)
+      pass.setPipeline(fadeMulPipe); pass.setBindGroup(0, fadeBG[0]); pass.draw(4);
+      pass.setPipeline(fadeSubPipe); pass.setBindGroup(0, fadeBG[1]); pass.draw(4);
+      // 粒子: 加算合成
+      if (n > 0) { pass.setPipeline(pointPipe); pass.setBindGroup(0, pointBG); pass.draw(4, n); }
+      pass.end();
+      // 上下を戻してキャンバスへ (全画面を上書きするので読み込み不要)
+      const bp = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), loadOp: 'clear', clearValue: [0, 0, 0, 1], storeOp: 'store' }] });
+      bp.setPipeline(blitPipe); bp.setBindGroup(0, blitBG); bp.draw(4); bp.end();
+      device.queue.submit([enc.finish()]);
+    },
+  };
+  const err = await device.popErrorScope();
+  if (err) {
+    console.warn('WebGPU のシェーダを作れません (WebGL を使います):', err.message);
+    device.destroy();
+    return null;
+  }
+  ctx = canvas.getContext('webgpu');
+  if (!ctx) { device.destroy(); return null; }
+  ctx.configure({ device, format: FORMAT, alphaMode: 'opaque', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+  return { renderer, sim };
+}
+
 function createCanvas2DRenderer() {
   const ctx = canvas.getContext('2d', { alpha: false });
   const styles = [];
@@ -1662,11 +2537,23 @@ function createCanvas2DRenderer() {
   };
 }
 
-let renderer = null;
-try { renderer = createWebGLRenderer(); } catch (e) { console.warn('WebGL 初期化失敗:', e); renderer = null; }
-if (!renderer) renderer = createCanvas2DRenderer();
-if (renderer.isGL2) {
-  try { gpu = createGpuSim(renderer); } catch (e) { console.warn('GPU 計算の初期化失敗 (CPU で計算します):', e); gpu = null; }
+// 描画・GPU 計算は起動処理 (boot) で決める (WebGPU の準備は非同期)。それまでは何もしない仮の描画先
+let renderer = { name: '', applyStyle() {}, resize() {}, onCountChanged() {}, draw() {} };
+/** 使える中で一番速い描画・計算を選ぶ: WebGPU → WebGL2 (+GPU 計算) → WebGL1 → Canvas2D。
+ *  URL に ?gl=1 を付けると WebGPU を使わない (比較・確認用) */
+async function chooseBackend() {
+  if (!/[?&]gl=1/.test(location.search)) {
+    try {
+      const wg = await createWebGPUBackend();
+      if (wg) { renderer = wg.renderer; gpu = wg.sim; return; }
+    } catch (e) { console.warn('WebGPU 初期化失敗 (WebGL を使います):', e); }
+  }
+  let r = null;
+  try { r = createWebGLRenderer(); } catch (e) { console.warn('WebGL 初期化失敗:', e); r = null; }
+  renderer = r || createCanvas2DRenderer();
+  if (renderer.isGL2) {
+    try { gpu = createGpuSim(renderer); } catch (e) { console.warn('GPU 計算の初期化失敗 (CPU で計算します):', e); gpu = null; }
+  }
 }
 
 /* =====================================================================
@@ -1676,7 +2563,7 @@ const $ = (id) => document.getElementById(id);
 const ui = {
   panel: $('panel'), count: $('count'), countVal: $('countVal'),
   rmax: $('rmax'), rmaxVal: $('rmaxVal'), friction: $('friction'), frictionVal: $('frictionVal'),
-  types: $('types'), typesVal: $('typesVal'),
+  types: $('types'), typesVal: $('typesVal'), speed: $('speed'), speedVal: $('speedVal'),
   fps: $('fps'), notice: $('notice'), matrix: $('matrix'), matrixInfo: $('matrixInfo'), ring: $('ring'),
   btnPause: $('btnPause'),
 };
@@ -1696,6 +2583,15 @@ setupSlider(ui.count, 0, COUNT_STEPS, 1, sliderFromCount(DEFAULT_COUNT));
 setupSlider(ui.rmax, MIN_RMAX, MAX_RMAX, 1, DEFAULT_RMAX);
 setupSlider(ui.friction, MIN_HALF_LIFE, MAX_HALF_LIFE, 0.005, DEFAULT_HALF_LIFE);
 setupSlider(ui.types, 1, MAX_TYPES, 1, DEFAULT_TYPES);
+setupSlider(ui.speed, 1, MAX_SPEED, 1, 1);
+// 実際に回すステップ数 (重いときは粒子数を減らす前にまずこれを下げる。軽くなれば戻す)
+let speedNow = 1;
+function setSpeed(v) {
+  params.speed = Math.max(1, Math.min(MAX_SPEED, v | 0));
+  speedNow = params.speed;
+  refreshLabels();
+}
+ui.speed.addEventListener('input', () => setSpeed(+ui.speed.value));
 
 function refreshLabels() {
   ui.count.value = sliderFromCount(params.count);
@@ -1704,6 +2600,8 @@ function refreshLabels() {
   ui.frictionVal.textContent = params.halfLife.toFixed(3) + ' 秒';
   ui.types.value = numTypes;
   ui.typesVal.textContent = numTypes;
+  ui.speed.value = params.speed;
+  ui.speedVal.textContent = '×' + params.speed + (speedNow < params.speed ? ` (負荷軽減中 ×${speedNow})` : '');
   ui.btnPause.textContent = params.paused ? '再開' : '一時停止';
 }
 
@@ -1718,8 +2616,23 @@ ui.friction.addEventListener('input', () => { params.halfLife = +ui.friction.val
 // セルを上下にドラッグ (上 = 引き寄せる / 下 = 離れる)、ホイールで微調整、ダブルクリックで 0
 const matrixCells = [];
 const typeCss = (t) => `rgb(${TYPE_COLORS[t*3]*255|0},${TYPE_COLORS[t*3+1]*255|0},${TYPE_COLORS[t*3+2]*255|0})`;
-const MATRIX_DRAG_PX = 90;          // 何 px ドラッグで係数が 1 変わるか
+const MATRIX_DRAG_PX = 90;          // 何 px ドラッグで値が 1 変わるか
 let matrixHover = -1, matrixDrag = null;
+// 編集対象: force = 力の係数 / max = 組ごとの最大距離 / min = 組ごとの反発距離
+let matrixMode = 'force';
+const MATRIX_MODES = {
+  force: { get: (k) => matrix[k], set: (k, v) => setMatrixValue(k, v), wheel: 0.05, def: () => 0 },
+  max:   { get: (k) => pairMax[k], set: (k, v) => setPairRange(pairMax, k, v, 0.1, 1), wheel: 0.05, def: () => 1 },
+  min:   { get: (k) => pairMin[k], set: (k, v) => setPairRange(pairMin, k, v, 0.05, 0.9), wheel: 0.02, def: () => params.beta },
+};
+const curMode = () => MATRIX_MODES[matrixMode];
+document.getElementById('matrixMode').addEventListener('click', (e) => {
+  const m = e.target.dataset && e.target.dataset.mode;
+  if (!m || !MATRIX_MODES[m]) return;
+  matrixMode = m;
+  for (const b of e.currentTarget.querySelectorAll('button')) b.classList.toggle('on', b.dataset.mode === m);
+  refreshMatrixView();
+});
 
 function buildMatrixGrid() {
   ui.matrix.textContent = '';
@@ -1744,15 +2657,15 @@ function buildMatrixGrid() {
       d.addEventListener('pointerdown', (e) => {
         e.preventDefault();
         d.setPointerCapture(e.pointerId);
-        matrixDrag = { k, y0: e.clientY, v0: matrix[k] };
-        setMatrixValue(k, matrix[k]);          // 補間中ならここで止める
+        matrixDrag = { k, y0: e.clientY, v0: curMode().get(k) };
+        if (matrixMode === 'force') setMatrixValue(k, matrix[k]);   // 補間中ならここで止める
         d.classList.add('active'); ui.matrix.classList.add('editing');
         refreshMatrixView();
       });
       d.addEventListener('pointermove', (e) => {
         if (!matrixDrag || matrixDrag.k !== k) return;
         const v = matrixDrag.v0 + (matrixDrag.y0 - e.clientY) / MATRIX_DRAG_PX;
-        setMatrixValue(k, Math.round(v * 100) / 100);
+        curMode().set(k, Math.round(v * 100) / 100);
         refreshMatrixView();
       });
       const end = () => {
@@ -1765,10 +2678,10 @@ function buildMatrixGrid() {
       d.addEventListener('pointercancel', end);
       d.addEventListener('wheel', (e) => {
         e.preventDefault();
-        setMatrixValue(k, Math.round((matrix[k] - Math.sign(e.deltaY) * 0.05) * 100) / 100);
+        curMode().set(k, Math.round((curMode().get(k) - Math.sign(e.deltaY) * curMode().wheel) * 100) / 100);
         refreshMatrixView();
       }, { passive: false });
-      d.addEventListener('dblclick', () => { setMatrixValue(k, 0); refreshMatrixView(); });
+      d.addEventListener('dblclick', () => { curMode().set(k, curMode().def()); refreshMatrixView(); });
       ui.matrix.appendChild(d); matrixCells.push(d);
     }
   }
@@ -1777,10 +2690,21 @@ buildMatrixGrid();
 
 function refreshMatrixView() {
   for (let k = 0; k < matrixCells.length; k++) {
-    const v = matrix[k], a = Math.abs(v).toFixed(2);
-    matrixCells[k].style.background = v >= 0 ? `rgba(90,220,130,${a})` : `rgba(240,80,90,${a})`;
-    // ドラッグ中のセルだけ数値を出す
-    matrixCells[k].textContent = matrixDrag && matrixDrag.k === k ? (v >= 0 ? '+' : '') + v.toFixed(2) : '';
+    const dragging = matrixDrag && matrixDrag.k === k;
+    if (matrixMode === 'force') {
+      const v = matrix[k], a = Math.abs(v).toFixed(2);
+      matrixCells[k].style.background = v >= 0 ? `rgba(90,220,130,${a})` : `rgba(240,80,90,${a})`;
+      // ドラッグ中のセルだけ数値を出す
+      matrixCells[k].textContent = dragging ? (v >= 0 ? '+' : '') + v.toFixed(2) : '';
+    } else if (matrixMode === 'max') {
+      const v = pairMax[k];
+      matrixCells[k].style.background = `rgba(110,170,255,${(0.12 + 0.88 * (v - 0.1) / 0.9).toFixed(2)})`;
+      matrixCells[k].textContent = dragging ? Math.round(v * params.rMax) : '';
+    } else {
+      const v = pairMin[k];
+      matrixCells[k].style.background = `rgba(255,185,90,${(0.12 + 0.88 * (v - 0.05) / 0.85).toFixed(2)})`;
+      matrixCells[k].textContent = dragging ? Math.round(v * pairMax[k] * params.rMax) : '';
+    }
   }
   refreshMatrixInfo();
 }
@@ -1789,10 +2713,24 @@ function refreshMatrixView() {
 function refreshMatrixInfo() {
   const k = matrixDrag ? matrixDrag.k : matrixHover;
   if (k < 0) {
-    ui.matrixInfo.innerHTML = '<span class="hint">↑ドラッグ 引き寄せ / ↓ 離れる / ダブルクリック 0</span>';
+    ui.matrixInfo.innerHTML = matrixMode === 'force'
+      ? '<span class="hint">↑ドラッグ 引き寄せ / ↓ 離れる / ダブルクリック 0</span>'
+      : matrixMode === 'max'
+        ? '<span class="hint">↑ドラッグ 遠くまで届く / ↓ 近くだけ / ダブルクリック 最大</span>'
+        : '<span class="hint">↑ドラッグ 反発が広い / ↓ 狭い / ダブルクリック 初期値</span>';
     return;
   }
   const i = (k / numTypes) | 0, j = k % numTypes, v = matrix[k];
+  if (matrixMode !== 'force') {
+    const R = params.rMax * pairMax[k];
+    const txt = matrixMode === 'max'
+      ? `が影響を受ける距離 〜${Math.round(R)}px<span class="val" style="color:#8bf">${Math.round(pairMax[k] * 100)}%</span>`
+      : `に近すぎて反発する距離 〜${Math.round(R * pairMin[k])}px<span class="val" style="color:#fc8">${Math.round(pairMin[k] * 100)}%</span>`;
+    ui.matrixInfo.innerHTML =
+      `<span class="dot" style="background:${typeCss(i)}"></span>が` +
+      `<span class="dot" style="background:${typeCss(j)}"></span>${txt}`;
+    return;
+  }
   const word = Math.abs(v) < 0.05 ? 'を気にしない' : v > 0 ? (v > 0.5 ? 'に強く引き寄せられる' : 'に引き寄せられる')
                                                           : (v < -0.5 ? 'から強く離れる' : 'から離れる');
   ui.matrixInfo.innerHTML =
@@ -1832,6 +2770,7 @@ $('presets').addEventListener('click', (e) => {
   const name = e.target.dataset && e.target.dataset.preset;
   if (!name) return;
   if (name === 'random') { startCreation(); return; }
+  if (name === 'ranges') { resetPairRanges(); refreshMatrixView(); return; }
   const target = new Float32Array(numTypes * numTypes);
   PRESETS[name](target);
   lerpMatrixTo(target);
@@ -1841,23 +2780,27 @@ $('presets').addEventListener('click', (e) => {
 function setNumTypes(n) {
   n = Math.max(1, Math.min(MAX_TYPES, n | 0));
   if (n === numTypes) return;
-  const old = numTypes, oldM = matrix;
+  const old = numTypes, oldM = matrix, oldMax = pairMax, oldMin = pairMin;
   numTypes = n;
   matrix = new Float32Array(n * n);
   matrixFrom = new Float32Array(n * n);
   matrixTo = new Float32Array(n * n);
+  pairMax = new Float64Array(n * n).fill(1);
+  pairMin = new Float64Array(n * n).fill(params.beta);
   for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
     matrix[i * n + j] = i < old && j < old ? oldM[i * old + j] : Math.random() * 2 - 1;
+    if (i < old && j < old) { pairMax[i * n + j] = oldMax[i * old + j]; pairMin[i * n + j] = oldMin[i * old + j]; }
   }
+  updateRangesUniform();
   matrixLerpT = 1;
   computeTypeColors();
   renderer.applyStyle();
   // 粒子の色を新しい種類数で均等に振り直す (位置・速度はそのまま)
   const onGpu = gpu && gpu.active;
-  if (onGpu) gpu.download();
+  if (onGpu && !gpu.uploadTypes) gpu.download();   // WebGL 版: 位置を読み戻してから色ごと送り直す
   for (let i = 0; i < params.count; i++) type[i] = (Math.random() * n) | 0;
   renderer.onCountChanged(params.count, 0);
-  if (onGpu) gpu.uploadRange(0, params.count);
+  if (onGpu) { if (gpu.uploadTypes) gpu.uploadTypes(0, params.count); else gpu.uploadRange(0, params.count); }
   simVersion++; idleFrames = 0;
   buildMatrixGrid(); refreshMatrixView(); refreshLabels();
 }
@@ -1868,13 +2811,15 @@ const ADVANCED = [
   // key, ラベル, 最小, 最大, 刻み, 表示, 初期値
   ['timeScale',     '時間の速さ',             0.1,  2,     0.05, (v) => '×' + v.toFixed(2), 1],
   ['forceFactor',   '力の強さ',               1,    40,    0.5,  (v) => v.toFixed(1), FORCE_FACTOR],
-  ['beta',          '近すぎて反発する距離',   0.05, 0.9,   0.01, (v) => Math.round(v * 100) + '% (rMax 比)', BETA],
+  ['beta',          '近すぎて反発する距離 (全組)', 0.05, 0.9, 0.01, (v) => Math.round(v * 100) + '% (rMax 比)', BETA],
   ['pointSize',     '点の大きさ',             1,    20,    0.5,  (v) => v.toFixed(1) + ' px', POINT_SIZE],
   ['pointAlpha',    '点の明るさ',             0.05, 1,     0.01, (v) => v.toFixed(2), POINT_ALPHA],
   ['trailFade',     '残像の消え方',           0.02, 1,     0.01, (v) => v >= 1 ? '残像なし' : v.toFixed(2) + (v < 0.1 ? ' (長い)' : ''), TRAIL_FADE],
   ['pointerRadius', '「破壊」の半径',         30,   500,   5,    (v) => v + ' px', POINTER_RADIUS],
   ['pointerForce',  '「破壊」の強さ',         0,    20000, 100,  (v) => String(v), POINTER_FORCE],
   ['lerpTime',      '関係が切り替わる時間',   0,    5,     0.1,  (v) => v.toFixed(1) + ' 秒', MATRIX_LERP_TIME],
+  ['autoCreate',    '自動で「創造」',         0,    180,   5,    (v) => v > 0 ? v + ' 秒ごと' : 'しない', 0],
+  ['idleHide',      '操作がないとき隠す',     0,    120,   5,    (v) => v > 0 ? v + ' 秒後 (パネル・カーソル)' : 'しない', 0],
 ];
 const advInputs = {};
 (function buildAdvanced() {
@@ -1895,7 +2840,7 @@ const advInputs = {};
 })();
 function setAdvanced(key, v) {
   params[key] = v;
-  if (key === 'beta') simVersion++;                          // 力そのものが変わる
+  if (key === 'beta') { pairMin.fill(v); updateRangesUniform(); simVersion++; refreshMatrixView(); }   // 全組の反発距離
   if (key === 'pointSize' || key === 'pointAlpha') renderer.applyStyle();
   if (key === 'pointSize' || key === 'pointAlpha' || key === 'trailFade') idleFrames = 0;   // 停止中も描き直す
   if (key === 'pointerRadius') updateRing();
@@ -1921,6 +2866,15 @@ function togglePanel() { document.body.classList.toggle('panel-hidden'); }
 $('panelClose').addEventListener('click', togglePanel);
 $('panelOpen').addEventListener('click', togglePanel);
 
+/** 位置だけをばらまき直す (関係・色・範囲はそのまま) */
+function scatterParticles() {
+  if (gpu && gpu.busy) return;
+  const n = params.count;
+  for (let i = 0; i < n; i++) { posX[i] = Math.random() * worldW; posY[i] = Math.random() * worldH; velX[i] = 0; velY[i] = 0; }
+  if (gpu && gpu.active) gpu.uploadRange(0, n);
+  simVersion++; idleFrames = 0;
+}
+$('btnScatter').addEventListener('click', scatterParticles);
 $('btnCreate').addEventListener('click', startCreation);
 ui.btnPause.addEventListener('click', togglePause);
 $('btnFull').addEventListener('click', toggleFullscreen);
@@ -1932,6 +2886,9 @@ window.addEventListener('keydown', (e) => {
     case 'KeyR':  startCreation(); break;
     case 'KeyF':  toggleFullscreen(); break;
     case 'KeyH':  togglePanel(); break;
+    case 'KeyS':  scatterParticles(); break;
+    default:
+      if (/^Digit[1-8]$/.test(e.code)) setSpeed(+e.code.slice(5));   // 1〜8: 速度
   }
 });
 
@@ -1972,6 +2929,15 @@ let elapsed = 0;
 let fpsFrames = 0, fpsTime = 0, lowFpsTime = 0;
 let simMsSum = 0, simSteps = 0;   // 計算時間の計測 (どこが重いかの切り分け用)
 let stallFrames = 0;              // Worker 待ちでシミュレーションを進めなかったフレーム数
+let speedHighTime = 0;            // FPS に余裕がある状態が続いた時間 (下げた速度を戻す判定)
+let autoCreateTime = 0;           // 自動「創造」までの経過時間
+let idleTime = 0;                 // 最後の操作からの時間
+let saveTime = 0;                 // 設定の自動保存の間隔
+function noteActivity() {
+  idleTime = 0;
+  document.body.classList.remove('idle');
+}
+for (const ev of ['pointermove', 'pointerdown', 'keydown', 'wheel']) window.addEventListener(ev, noteActivity, { passive: true });
 
 /** CPU の力計算 (Worker 待ちを含む) が重い状態が続いたら GPU 計算に切り替える */
 let heavySteps = 0;
@@ -1991,7 +2957,7 @@ function cpuPairEstimate() {
 }
 /** 粒子数・rMax・画面サイズから、CPU と GPU のどちらで計算するかを決める */
 function updateEngine() {
-  if (!gpu) return;
+  if (!gpu || gpu.busy) return;
   const est = cpuPairEstimate();
   if (!gpu.active) {
     if (est > GPU_ON_PAIRS && gpu.fits()) { gpu.enter(); heavySteps = 0; lowFpsTime = 0; refreshEngineLabel(); }
@@ -2036,20 +3002,29 @@ function frame(now) {
     // 60Hz では毎フレーム、120Hz では2フレームに1回進む。処理落ち時は動きが遅くなるだけ。
     accumulator += dtReal;
     if (accumulator >= DT * 0.75) {
-      if (par.inFlight(params.count)) {
-        // Worker の計算がまだ届いていない。このフレームは進めずに待つ
+      if ((gpu && gpu.busy) || par.inFlight(params.count)) {
+        // GPU からの読み戻し中 / Worker の計算がまだ届いていない。このフレームは進めずに待つ
         stallFrames++;
-        cpuHeavy(par.pendingMs);
+        if (!(gpu && gpu.busy)) cpuHeavy(par.pendingMs);
       } else {
-        const t0 = performance.now();
-        const usedWorkers = step(DT * params.timeScale);
-        const ms = performance.now() - t0;
-        if (!usedWorkers) par.observe(ms);
-        if (!(gpu && gpu.active)) cpuHeavy(usedWorkers ? Math.max(ms, par.lastLatencyMs) : ms);
-        simMsSum += ms; simSteps++;
+        // シミュレーション速度: 1 フレームに speedNow ステップ (各ステップは ×1 と同じ計算)
+        for (let s = 0; s < speedNow; s++) {
+          if (s > 0 && ((gpu && gpu.busy) || par.inFlight(params.count))) break;
+          const t0 = performance.now();
+          const usedWorkers = step(DT * params.timeScale);
+          const ms = performance.now() - t0;
+          if (!usedWorkers) par.observe(ms);
+          if (!(gpu && gpu.active)) cpuHeavy(usedWorkers ? Math.max(ms, par.lastLatencyMs) : ms);
+          simMsSum += ms; simSteps++;
+        }
         accumulator = Math.min(Math.max(accumulator - DT, 0), DT * 0.5);
         idleFrames = 0;
       }
+    }
+    // 自動で「創造」
+    if (params.autoCreate > 0) {
+      autoCreateTime += dtReal;
+      if (autoCreateTime >= params.autoCreate) { autoCreateTime = 0; startCreation(); }
     }
   }
 
@@ -2064,6 +3039,11 @@ function frame(now) {
   // FPS を 0.5 秒ごとに更新 (実際の経過時間で。極端に重くても数秒で自動削減が効くように)
   if (skipFpsFrame) skipFpsFrame = false;
   else { fpsFrames++; fpsTime += dtRaw; }
+  // 操作がないとき: パネルとカーソルを隠す / 設定を数秒ごとに自動保存
+  idleTime += dtRaw;
+  if (params.idleHide > 0 && idleTime >= params.idleHide) document.body.classList.add('idle');
+  saveTime += dtRaw;
+  if (saveTime >= 3) { saveTime = 0; saveSettings(); }
   if (fpsTime >= 0.5) {
     const fps = fpsFrames / fpsTime;
     // 自動削減の判定は「シミュレーションが実際に進んだ」フレームで行う
@@ -2073,12 +3053,20 @@ function frame(now) {
     // 計算が軽いのに FPS が低い場合は、描画 (GPU) か画面側の制限が原因
     // (GPU 計算中は命令を出す時間しか測れないので表示しない)
     ui.fps.textContent = 'FPS ' + fps.toFixed(0) +
-      (simSteps && !(gpu && gpu.active) ? ' / 計算 ' + (simMsSum / simSteps).toFixed(1) + 'ms' : '');
+      (simSteps && !(gpu && gpu.active) ? ' / 計算 ' + (simMsSum / simSteps).toFixed(1) + 'ms' : '') +
+      (gpu && gpu.active && gpu.gpuMs ? ' / GPU ' + gpu.gpuMs.toFixed(1) + 'ms' : '');
     simMsSum = 0; simSteps = 0;
     // 低 FPS が続いたら粒子数を減らす
     if (elapsed > FPS_WARMUP && !document.hidden && effectiveFps < FPS_LOW_THRESHOLD) {
       lowFpsTime += fpsTime;
-      if (lowFpsTime >= FPS_LOW_DURATION && params.count > MIN_COUNT) {
+      if (lowFpsTime >= FPS_LOW_DURATION && speedNow > 1) {
+        // まず速度 (1 フレームのステップ数) を下げる。粒子数はそのまま
+        const before = speedNow;
+        speedNow = Math.max(1, Math.floor(speedNow * 0.7));
+        refreshLabels();
+        showNotice(`負荷軽減: 速度を ×${before} → ×${speedNow} に下げました`);
+        lowFpsTime = 0;
+      } else if (lowFpsTime >= FPS_LOW_DURATION && params.count > MIN_COUNT) {
         const before = params.count;
         // 極端に重いときは大きく減らす (100万個 → 数万個 まで何十秒も待たせない)
         const factor = Math.max(0.5, Math.min(AUTO_REDUCE_FACTOR, effectiveFps / 60));
@@ -2089,6 +3077,11 @@ function frame(now) {
       }
     } else {
       lowFpsTime = 0;
+      // 余裕が続いたら、下げた速度を1段ずつ戻す
+      if (speedNow < params.speed && effectiveFps >= 55) {
+        speedHighTime += fpsTime;
+        if (speedHighTime >= 3) { speedNow++; speedHighTime = 0; refreshLabels(); }
+      } else speedHighTime = 0;
     }
     fpsFrames = 0; fpsTime = 0;
   }
@@ -2097,20 +3090,103 @@ function frame(now) {
 }
 
 /* =====================================================================
+ *  設定の保存・読み込み (このブラウザの localStorage に自動保存。ファイルへの書き出し・読み込みも可)
+ * ===================================================================== */
+function collectSettings() {
+  return {
+    app: 'shibalab-particle-life', v: 1,
+    count: params.count, rMax: params.rMaxSetting, halfLife: params.halfLife, types: numTypes, speed: params.speed,
+    matrix: Array.from(matrix), pairMax: Array.from(pairMax), pairMin: Array.from(pairMin),
+    adv: Object.fromEntries(ADVANCED.map(([k]) => [k, params[k]])),
+  };
+}
+let lastSaved = '';
+function saveSettings() {
+  const s = JSON.stringify(collectSettings());
+  if (s === lastSaved) return;
+  try { localStorage.setItem(SETTINGS_KEY, s); lastSaved = s; } catch (e) { /* 保存できない環境 (プライベートモード等) */ }
+}
+/** 設定を当てはめる (値はすべて範囲内に丸める)。粒子の位置はそのまま */
+function applySettings(s) {
+  if (!s || typeof s !== 'object') return false;
+  const num = (v, lo, hi, d) => (typeof v === 'number' && isFinite(v)) ? Math.max(lo, Math.min(hi, v)) : d;
+  if (s.types !== undefined) setNumTypes(num(s.types, 1, MAX_TYPES, numTypes) | 0);
+  const nn = numTypes * numTypes;
+  if (s.adv && typeof s.adv === 'object') {
+    for (const [key, , lo, hi] of ADVANCED) if (key in s.adv) setAdvanced(key, num(s.adv[key], lo, hi, params[key]));
+  }
+  if (Array.isArray(s.matrix) && s.matrix.length === nn) {
+    for (let k = 0; k < nn; k++) matrix[k] = num(s.matrix[k], -1, 1, matrix[k]);
+    matrixLerpT = 1;
+  }
+  if (Array.isArray(s.pairMax) && s.pairMax.length === nn) for (let k = 0; k < nn; k++) pairMax[k] = num(s.pairMax[k], 0.1, 1, 1);
+  if (Array.isArray(s.pairMin) && s.pairMin.length === nn) for (let k = 0; k < nn; k++) pairMin[k] = num(s.pairMin[k], 0.05, 0.9, params.beta);
+  updateRangesUniform();
+  if (s.rMax !== undefined) { params.rMaxSetting = num(s.rMax, MIN_RMAX, MAX_RMAX, params.rMaxSetting); rebuildGrid(); }
+  if (s.halfLife !== undefined) params.halfLife = num(s.halfLife, MIN_HALF_LIFE, MAX_HALF_LIFE, params.halfLife);
+  if (s.speed !== undefined) setSpeed(num(s.speed, 1, MAX_SPEED, 1));
+  if (s.count !== undefined) setParticleCount(num(s.count, MIN_COUNT, maxCount(), params.count));
+  simVersion++; idleFrames = 0;
+  refreshLabels(); refreshMatrixView(); refreshAdvanced(); updateEngine(); refreshEngineLabel();
+  return true;
+}
+$('btnExport').addEventListener('click', () => {
+  const blob = new Blob([JSON.stringify(collectSettings(), null, 1)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'particle-life-settings.json';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+$('btnImport').addEventListener('click', () => $('importFile').click());
+$('importFile').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  try { showNotice(applySettings(JSON.parse(await file.text())) ? '設定を読み込みました' : '設定ファイルの形式が違います'); }
+  catch (err) { showNotice('設定ファイルを読み込めませんでした'); }
+});
+$('btnResetAll').addEventListener('click', () => {
+  try { localStorage.removeItem(SETTINGS_KEY); } catch (e) { /* 無視 */ }
+  lastSaved = '';
+  setNumTypes(DEFAULT_TYPES);
+  for (const [key, , , , , , def] of ADVANCED) setAdvanced(key, def);
+  resetPairRanges();
+  params.rMaxSetting = DEFAULT_RMAX; rebuildGrid();
+  params.halfLife = DEFAULT_HALF_LIFE;
+  setSpeed(1);
+  setParticleCount(DEFAULT_COUNT);
+  startCreation();
+  refreshLabels(); refreshMatrixView(); refreshAdvanced(); updateEngine(); refreshEngineLabel();
+  showNotice('すべて初期値に戻しました');
+});
+window.addEventListener('pagehide', saveSettings);
+
+/* =====================================================================
  *  起動
  * ===================================================================== */
-worldW = Math.max(1, window.innerWidth);
-worldH = Math.max(1, window.innerHeight);
-// 使う分だけ生成 (増やしたときは setParticleCount が増えた分を生成する)
-for (let i = 0; i < params.count; i++) randomizeParticle(i);
-randomMatrixInto(matrix);
-setParticleCount(DEFAULT_COUNT);
-renderer.onCountChanged(params.count, 0);   // 最初の粒子のタイプを描画側へ (以後は増えた分だけ送る)
-resize();
-refreshLabels();
-refreshMatrixView();
-refreshEngineLabel();
-requestAnimationFrame(frame);
+async function boot() {
+  await chooseBackend();
+  worldW = Math.max(1, window.innerWidth);
+  worldH = Math.max(1, window.innerHeight);
+  // 使う分だけ生成 (増やしたときは setParticleCount が増えた分を生成する)
+  for (let i = 0; i < params.count; i++) randomizeParticle(i);
+  randomMatrixInto(matrix);
+  setParticleCount(DEFAULT_COUNT);
+  renderer.onCountChanged(params.count, 0);   // 最初の粒子のタイプを描画側へ (以後は増えた分だけ送る)
+  resize();
+  // 前回の設定を戻す (?reset を付けると戻さない)
+  if (!/[?&]reset/.test(location.search)) {
+    try { const saved = localStorage.getItem(SETTINGS_KEY); if (saved) applySettings(JSON.parse(saved)); }
+    catch (e) { console.warn('保存された設定を読めません:', e); }
+  }
+  refreshLabels();
+  refreshMatrixView();
+  refreshEngineLabel();
+  updateRing();
+  requestAnimationFrame(frame);
+}
+window.appReady = boot();
 
 /* ---- ユーティリティ ---- */
 function hslToRgb(h, s, l) {
