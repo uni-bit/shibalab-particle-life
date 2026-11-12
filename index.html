@@ -168,18 +168,18 @@ const MAX_TYPES          = 10;      // 色の種類数の上限 (シェーダの
 // 粒子数は「画面の広さあたりの数 (密度)」で持ち、開いた画面の広さから個数を決める。
 // 世界の大きさ = 画面の大きさなので、個数のままだと小さい画面 (スマホ) ほど混み合って動きが変わるため
 const REF_AREA           = 1920 * 1080;          // 基準の画面の広さ [CSS px²] (個数だけの古い設定ファイルの換算用)
-const DEFAULT_DENSITY    = 17000 / REF_AREA;     // 初期の密度 [個 / CSS px²] (1920×1080 で 17000 個)
+const DEFAULT_DENSITY    = 14429.717 / 1e6;      // 初期の密度 [個 / CSS px²] (100万 px² あたり 14429.717 個 = 1920×1080 で約 29,900 個)
 const MIN_COUNT         = 500;     // スライダー最小
 const MAX_COUNT          = 1000000; // スライダー最大 (= 配列確保サイズ)。GPU 計算が使えるとき
 const MAX_COUNT_CPU      = 30000;   // GPU 計算が使えないときのスライダー最大
 
-const DEFAULT_RMAX       = 66;      // 相互作用半径 [CSS px]
+const DEFAULT_RMAX       = 50;      // 相互作用半径 [CSS px]
 const MIN_RMAX           = 30;
 const MAX_RMAX           = 160;
-const BETA               = 0.32;    // この正規化距離未満は常に反発
-const FORCE_FACTOR       = 9.5;     // 力の強さ (加速度 = f * rMax * FORCE_FACTOR)
+const BETA               = 0.52;    // この正規化距離未満は常に反発
+const FORCE_FACTOR       = 8;       // 力の強さ (加速度 = f * rMax * FORCE_FACTOR)
 
-const DEFAULT_HALF_LIFE  = 0.025;   // 速度が半分になるまでの時間 [s]
+const DEFAULT_HALF_LIFE  = 0.02;    // 速度が半分になるまでの時間 [s]
 const MIN_HALF_LIFE      = 0.01;
 const MAX_HALF_LIFE      = 0.20;
 const DT                 = 1 / 60;  // 固定シミュレーション時間刻み [s]
@@ -188,12 +188,12 @@ const SETTINGS_KEY       = 'shibalab-particle-life:settings';   // 設定の自�
 
 const MATRIX_LERP_TIME   = 1.5;     // 「創造」時に行列を補間する時間 [s]
 
-const POINTER_RADIUS     = 120;     // 「破壊」の影響半径 [CSS px]
+const POINTER_RADIUS     = 115;     // 「破壊」の影響半径 [CSS px]
 const POINTER_FORCE      = 5000;    // 「破壊」の押し出し加速度 [px/s^2]
 
 const MAX_DPR            = 1.5;     // devicePixelRatio の上限 (性能のため)
-const POINT_SIZE         = 8.5;     // 描画する点の大きさ [CSS px] (グロー込み)
-const POINT_ALPHA        = 0.52;    // 加算合成時の明るさ
+const POINT_SIZE         = 6;       // 描画する点の大きさ [CSS px] (グロー込み)
+const POINT_ALPHA        = 1;       // 加算合成時の明るさ
 // 描画は 1/60 秒に 1 回 (画面の書き換えが 120Hz などでも同じ。メインループ参照)
 const TRAIL_FADE         = 0.84;    // 残像: 描くたびに画面を暗くする割合 (1 = 残像なし)
 const TRAIL_FLOOR        = 2 / 255; // 残像が8bit丸めで残り続けないよう描くたびに引く値
