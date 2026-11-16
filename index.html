@@ -165,18 +165,23 @@
  * ===================================================================== */
 const DEFAULT_TYPES      = 6;       // 粒子の色の種類数 (初期値)
 const MAX_TYPES          = 10;      // 色の種類数の上限 (シェーダの配列サイズ)
-const DEFAULT_COUNT      = 3000;    // 初期粒子数
+const DEFAULT_COUNT      = 4700;    // 初期粒子数
 const MIN_COUNT          = 500;     // スライダー最小
-const MAX_COUNT          = 1000000; // スライダー最大 (= 配列確保サイズ)。GPU 計算が使えるとき
+// スライダー最大 (= 配列・GPU バッファの確保サイズ)。GPU 計算が使えるとき。
+// 配列と GPU バッファは起動時にこの個数ぶん確保するので、メモリの少ない端末 (スマホ・タブレットなど) では
+// 小さくする (100万個ぶん = CPU 約 60MB + GPU 約 100MB。10万個ぶんならその 1/10 程度)
+const LOW_MEMORY_DEVICE  = (navigator.deviceMemory !== undefined && navigator.deviceMemory <= 4) ||
+                           /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+const MAX_COUNT          = LOW_MEMORY_DEVICE ? 100000 : 1000000;
 const MAX_COUNT_CPU      = 30000;   // GPU 計算が使えないときのスライダー最大
 
-const DEFAULT_RMAX       = 60;      // 相互作用半径 [CSS px]
+const DEFAULT_RMAX       = 57;      // 相互作用半径 [CSS px]
 const MIN_RMAX           = 30;
 const MAX_RMAX           = 160;
-const BETA               = 0.3;     // この正規化距離未満は常に反発
-const FORCE_FACTOR       = 10;      // 力の強さ (加速度 = f * rMax * FORCE_FACTOR)
+const BETA               = 0.45;    // この正規化距離未満は常に反発
+const FORCE_FACTOR       = 7;       // 力の強さ (加速度 = f * rMax * FORCE_FACTOR)
 
-const DEFAULT_HALF_LIFE  = 0.04;    // 速度が半分になるまでの時間 [s]
+const DEFAULT_HALF_LIFE  = 0.025;   // 速度が半分になるまでの時間 [s]
 const MIN_HALF_LIFE      = 0.01;
 const MAX_HALF_LIFE      = 0.20;
 const DT                 = 1 / 60;  // 固定シミュレーション時間刻み [s]
@@ -189,9 +194,10 @@ const POINTER_RADIUS     = 140;     // 「破壊」の影響半径 [CSS px]
 const POINTER_FORCE      = 4000;    // 「破壊」の押し出し加速度 [px/s^2]
 
 const MAX_DPR            = 1.5;     // devicePixelRatio の上限 (性能のため)
-const POINT_SIZE         = 6;       // 描画する点の大きさ [CSS px] (グロー込み)
-const POINT_ALPHA        = 0.55;    // 加算合成時の明るさ
-const TRAIL_FADE         = 0.22;    // 残像: 毎フレーム画面を暗くする割合 (1 = 残像なし)
+const POINT_SIZE         = 4.5;      // 描画する点の大きさ [CSS px] (グロー込み)
+const POINT_ALPHA        = 1;       // 加算合成時の明るさ
+const POINT_SHARP        = 1;       // 粒の輪郭: 0 = ふんわり光る (グロー) / 1 = 輪郭のはっきりした円
+const TRAIL_FADE         = 1;       // 残像: 毎フレーム画面を暗くする割合 (1 = 残像なし)
 const TRAIL_FLOOR        = 2 / 255; // 残像が8bit丸めで残り続けないよう毎フレーム引く値
 
 const FPS_LOW_THRESHOLD  = 40;      // この FPS を下回り続けたら粒子数を自動削減
@@ -301,6 +307,7 @@ const params = {
   beta: BETA,
   pointSize: POINT_SIZE,
   pointAlpha: POINT_ALPHA,
+  pointSharp: POINT_SHARP,
   trailFade: TRAIL_FADE,
   pointerRadius: POINTER_RADIUS,
   pointerForce: POINTER_FORCE,
@@ -343,6 +350,21 @@ function randomizeParticle(i) {
   type[i] = (Math.random() * numTypes) | 0;
 }
 
+// 起動時の色どうしの関係 (色 6 種類)。展示用に選んだもの。R キー / 「創造」で別の関係へ移る
+const INITIAL_MATRIX = [
+  -0.5769, -0.7206, -0.3370, -0.0653, -0.4388, -0.5606,
+   0.5461,  0.7301, -0.5543,  0.4098, -0.7747, -0.0182,
+   0.4294,  0.3313, -0.6430,  0.4012,  0.8641,  0.4963,
+   0.9315,  0.9027, -0.0997,  0.8351, -0.1922,  0.5158,
+   0.3991, -0.5278,  0.8731, -0.3651, -0.3243, -0.5832,
+   0.3594,  0.4719, -0.9217,  0.1984, -0.6116,  0.7762,
+];
+/** 起動時の関係を target に入れる (色の数が違うときはランダム) */
+function initialMatrixInto(target) {
+  if (target.length === INITIAL_MATRIX.length) target.set(INITIAL_MATRIX);
+  else randomMatrixInto(target);
+}
+
 function randomMatrixInto(target) {
   for (let k = 0; k < target.length; k++) target[k] = Math.random() * 2 - 1;
 }
@@ -380,7 +402,7 @@ function updateMatrixLerp(dtReal) {
 }
 
 /** 今の環境で選べる最大粒子数 */
-function maxCount() { return gpu ? MAX_COUNT : MAX_COUNT_CPU; }
+function maxCount() { return gpu && gpu.usable !== false ? MAX_COUNT : MAX_COUNT_CPU; }
 
 function setParticleCount(n) {
   n = Math.max(MIN_COUNT, Math.min(maxCount(), n | 0));
@@ -454,7 +476,9 @@ function binParticles(n) {
   }
 }
 
-function step(dt) {
+/** 1 ステップ進める。prefetch = false のときは次のステップの力を Worker に先回りさせない
+ *  (同じフレームですぐ次のステップを回すとき。先回りさせると結果待ちで次が回せない) */
+function step(dt, prefetch = true) {
   const n = params.count;
   const rMax = params.rMax;
   const rMax2 = rMax * rMax;
@@ -575,7 +599,7 @@ function step(dt) {
   }
 
   // 次のステップの力を Worker に先回りで計算させる (重いときだけ)
-  par.dispatch(n);
+  if (prefetch) par.dispatch(n);
   return usedWorkers;
 }
 
@@ -792,8 +816,12 @@ const par = (() => {
     },
     /** まだ届いていない有効なジョブがあるか (あればこのフレームは step を待つ) */
     inFlight(n) {
-      return enabled && jobVersion === simVersion && jobN === n && waiting > 0 &&
-             performance.now() - jobTime <= WORKER_TIMEOUT_MS;
+      if (!(enabled && jobVersion === simVersion && jobN === n && waiting > 0)) return false;
+      if (performance.now() - jobTime <= WORKER_TIMEOUT_MS) return true;
+      // 返事が来ない Worker は壊れたとみなし、以後はメインスレッドで計算する
+      // (無効にしないと、毎ステップ同じ Worker に頼んではタイムアウトまで待つことになる)
+      disable('timeout');
+      return false;
     },
     dispatch(n) {
       if (!enabled || !active || matrixLerpT < 1) return;
@@ -895,13 +923,16 @@ function createWebGLRenderer() {
     }`, `
     precision mediump float;
     varying vec3 vColor;
-    uniform float uAlpha;
+    uniform float uAlpha, uSharp, uEdge;
     void main() {
       vec2 p = gl_PointCoord * 2.0 - 1.0;
       float d2 = dot(p, p);
       if (d2 > 1.0) discard;
       // 明るい芯 + 柔らかい外周 = 安価なグロー
+      // ふんわり光る形 (グロー) と、輪郭のはっきりした円 (縁は 1 画素だけなめらかに) を uSharp で混ぜる
       float glow = exp(-d2 * 5.0) + (1.0 - d2) * 0.15;
+      float disc = clamp((1.0 - sqrt(d2)) * uEdge, 0.0, 1.0);
+      glow = mix(glow, disc, uSharp);
       gl_FragColor = vec4(vColor * glow * uAlpha, 1.0);
     }`, ['aX', 'aY', 'aType']);
 
@@ -917,12 +948,14 @@ function createWebGLRenderer() {
   const uSize   = gl.getUniformLocation(pointProg, 'uSize');
   const uColors = gl.getUniformLocation(pointProg, 'uColors');
   const uAlpha  = gl.getUniformLocation(pointProg, 'uAlpha');
+  const uSharp  = gl.getUniformLocation(pointProg, 'uSharp');
+  const uEdge   = gl.getUniformLocation(pointProg, 'uEdge');
   const uFadeColor = gl.getUniformLocation(fadeProg, 'uColor');
 
 
   // GPU 計算中の描画: 位置を GPU 上の状態テクスチャから直接読む (CPU への読み戻し・転送なし)。
   // 点の形・色・明るさの計算は上の pointProg と同一
-  let texProg = null, uTexWorld, uTexSize, uTexState, uTexW, uTexAlpha, uTexColors;
+  let texProg = null, uTexWorld, uTexSize, uTexState, uTexW, uTexAlpha, uTexColors, uTexSharp, uTexEdge;
   if (isGL2) try {
     texProg = program(`#version 300 es
       layout(location = 0) in float aType;
@@ -941,13 +974,15 @@ function createWebGLRenderer() {
       }`, `#version 300 es
       precision mediump float;
       in vec3 vColor;
-      uniform float uAlpha;
+      uniform float uAlpha, uSharp, uEdge;
       out vec4 outColor;
       void main() {
         vec2 p = gl_PointCoord * 2.0 - 1.0;
         float d2 = dot(p, p);
         if (d2 > 1.0) discard;
         float glow = exp(-d2 * 5.0) + (1.0 - d2) * 0.15;
+        float disc = clamp((1.0 - sqrt(d2)) * uEdge, 0.0, 1.0);
+        glow = mix(glow, disc, uSharp);
         outColor = vec4(vColor * glow * uAlpha, 1.0);
       }`, ['aType']);
     uTexWorld = gl.getUniformLocation(texProg, 'uWorld');
@@ -955,6 +990,8 @@ function createWebGLRenderer() {
     uTexState = gl.getUniformLocation(texProg, 'uState');
     uTexW     = gl.getUniformLocation(texProg, 'uTexW');
     uTexAlpha = gl.getUniformLocation(texProg, 'uAlpha');
+    uTexSharp = gl.getUniformLocation(texProg, 'uSharp');
+    uTexEdge  = gl.getUniformLocation(texProg, 'uEdge');
     uTexColors = gl.getUniformLocation(texProg, 'uColors');
     gl.useProgram(texProg);
     gl.uniform1i(uTexState, 0);
@@ -986,10 +1023,12 @@ function createWebGLRenderer() {
     const size = Math.min(params.pointSize * dpr, sizeRange[1]);
     gl.useProgram(pointProg);
     gl.uniform1f(uSize, size); gl.uniform1f(uAlpha, params.pointAlpha);
+    gl.uniform1f(uSharp, params.pointSharp); gl.uniform1f(uEdge, size * 0.5);
     gl.uniform3fv(uColors, TYPE_COLORS);
     if (texProg) {
       gl.useProgram(texProg);
       gl.uniform1f(uTexSize, size); gl.uniform1f(uTexAlpha, params.pointAlpha);
+      gl.uniform1f(uTexSharp, params.pointSharp); gl.uniform1f(uTexEdge, size * 0.5);
       gl.uniform3fv(uTexColors, TYPE_COLORS);
     }
   }
@@ -1745,6 +1784,8 @@ function createGpuSim(r) {
   return {
     texW: TEXW,
     get active() { return !!impl && impl.active; },
+    /** 初期化に失敗したら false (粒子数の上限を CPU 用に下げる) */
+    get usable() { return !broken; },
     get enterCount() { return impl ? impl.enterCount : 0; },
     get stateTexture() { return impl.stateTexture; },
     get drawInfo() { return impl ? impl.drawInfo : null; },
@@ -1753,7 +1794,15 @@ function createGpuSim(r) {
       if (broken) return;
       if (!impl) {
         try { impl = build(); }
-        catch (e) { console.warn('GPU 計算の初期化失敗 (CPU で計算します):', e); broken = true; return; }
+        catch (e) {
+          console.warn('GPU 計算の初期化失敗 (CPU で計算します):', e); broken = true;
+          // GPU で計算できないので、粒子数を CPU で回せる上限まで下げる (そのままだと画面が固まる)
+          if (params.count > MAX_COUNT_CPU) {
+            setParticleCount(MAX_COUNT_CPU); refreshLabels();
+            showNotice(`GPU 計算を使えないため、粒子数を ${MAX_COUNT_CPU} に下げました`);
+          }
+          return;
+        }
       }
       impl.enter();
     },
@@ -1794,6 +1843,46 @@ function createGpuSim(r) {
  *  力の式・摩擦・破壊・トーラスは CPU 版と同じ (32bit 浮動小数のため丸め誤差の分だけ異なる)。
  *  並べ替えの順番 (同じセル内) は原子加算の順で毎回変わりうる → 足す順番による丸め誤差の分だけ揺らぐ。
  * ===================================================================== */
+/** subgroup 命令で「作業グループ 32 レーンの接頭和」が取れるかを実際に動かして確かめる。
+ *  force シェーダは「32 レーンが 1 つの subgroup に、レーン番号順で入る」ことを前提にしているが、
+ *  規格はこの対応を保証していない。違っていれば subgroup を使わない経路にする (失敗・エラーも false) */
+async function probeSubgroups(device) {
+  try {
+    const G = 64, bytes = G * 32 * 4;
+    device.pushErrorScope('validation');
+    const out = device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    const read = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const pipe = device.createComputePipeline({
+      layout: 'auto',
+      compute: { entryPoint: 'main', module: device.createShaderModule({ code: `enable subgroups;
+        @group(0) @binding(0) var<storage, read_write> res: array<u32>;
+        @compute @workgroup_size(32)
+        fn main(@builtin(workgroup_id) w: vec3u, @builtin(local_invocation_index) t: u32) {
+          let pre = subgroupExclusiveAdd(1u);
+          let tot = subgroupAdd(1u);
+          res[w.x * 32u + t] = select(0u, 1u, pre == t && tot == 32u);
+        }` }) },
+    });
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(pipe);
+    pass.setBindGroup(0, device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: out } }] }));
+    pass.dispatchWorkgroups(G);
+    pass.end();
+    enc.copyBufferToBuffer(out, 0, read, 0, bytes);
+    device.queue.submit([enc.finish()]);
+    const err = await device.popErrorScope();
+    let ok = !err;
+    if (ok) {
+      await read.mapAsync(GPUMapMode.READ);
+      ok = new Uint32Array(read.getMappedRange()).every((v) => v === 1);
+      read.unmap();
+    }
+    out.destroy(); read.destroy();
+    return ok;
+  } catch (e) { return false; }
+}
+
 async function createWebGPUBackend() {
   if (!navigator.gpu) return null;
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
@@ -1814,13 +1903,18 @@ async function createWebGPUBackend() {
   device.lost.then((info) => {
     if (info.reason === 'destroyed') return;
     contextLost = true;
-    showNotice('GPU がリセットされました。読み込み直します');
-    setTimeout(() => location.reload(), 1500);
+    if (noteGpuLost()) {
+      showNotice('GPU がリセットされました。読み込み直します');
+      setTimeout(() => location.reload(), 1500);
+    }
   });
-  // 32 レーンの subgroup がそろう環境 (NVIDIA など) では接頭和を subgroup 命令で
+  // 32 レーンの subgroup がそろう環境 (NVIDIA など) では接頭和を subgroup 命令で。
+  // 大きさが 32 でも並び方までは保証されないので、実際に動かして確かめてから使う
+  const sgInfo = adapter.info || {};
+  const SG = device.features.has('subgroups') && sgInfo.subgroupMinSize === 32 && sgInfo.subgroupMaxSize === 32 &&
+             await probeSubgroups(device);
+  device.pushErrorScope('out-of-memory');             // 下で確保するバッファがメモリ不足で作れなかった場合も拾う
   device.pushErrorScope('validation');                // 下で作るシェーダ・パイプラインの検証エラーを集める
-  const info = adapter.info || {};
-  const SG = device.features.has('subgroups') && info.subgroupMinSize === 32 && info.subgroupMaxSize === 32;
   const hasTs = device.features.has('timestamp-query');
 
   const U = GPUBufferUsage;
@@ -1838,7 +1932,7 @@ async function createWebGPUBackend() {
   // (最後に反転して表示)、四隅の順番・頂点の座標・指数関数の計算も同じ。こうすると頂点が 1/256 画素の
   // 格子に寄るときの丸めまで一致し、WebGL 版とほぼ同じ画素値になる (違いは 100k 粒子で 1/255 が十数画素)
   const drawSrc = `
-    struct RU { world: vec2f, half: vec2f, alpha: f32, mode: u32, p0: u32, p1: u32 };
+    struct RU { world: vec2f, half: vec2f, alpha: f32, mode: u32, sharp: f32, edge: f32 };
     @group(0) @binding(0) var<uniform> ru: RU;
     @group(0) @binding(1) var<uniform> colors: array<vec4f, ${MAX_TYPES}>;
     @group(0) @binding(2) var<storage, read> st: array<vec4f>;
@@ -1863,7 +1957,10 @@ async function createWebGPUBackend() {
       let d2 = dot(p, p);
       if (d2 > 1.0) { discard; }
       // 明るい芯 + 柔らかい外周 (WebGL 版と同じ式。exp(-5 d2) = exp2(d2 × -5 log2 e))
-      let glow = fma(1.0 - d2, 0.15, exp2(d2 * -7.213475204444817));
+      let soft = fma(1.0 - d2, 0.15, exp2(d2 * -7.213475204444817));
+      // 輪郭のはっきりした円 (縁は 1 画素だけなめらかに) と混ぜる (WebGL 版と同じ式)
+      let disc = clamp((1.0 - sqrt(d2)) * ru.edge, 0.0, 1.0);
+      let glow = mix(soft, disc, ru.sharp);
       return vec4f(i.col * glow * ru.alpha, 1.0);
     }
     @group(0) @binding(0) var<uniform> fadeColor: vec4f;
@@ -2430,6 +2527,7 @@ async function createWebGPUBackend() {
     // (0.5 × (1 / (画面の半分の大きさ)) × 大きさ)。丸めが違うと頂点が 1/256 画素の格子で別の位置に寄ることがある
     const f = Math.fround, half = (px) => f(f(0.5 * f(1 / f(px * 0.5))) * size);
     ruF[2] = half(pxW); ruF[3] = half(pxH); ruF[4] = params.pointAlpha;
+    ruF[6] = params.pointSharp; ruF[7] = size * 0.5;
     for (let t = 0; t < MAX_TYPES; t++) {
       colIo[t * 4] = TYPE_COLORS[t * 3]; colIo[t * 4 + 1] = TYPE_COLORS[t * 3 + 1]; colIo[t * 4 + 2] = TYPE_COLORS[t * 3 + 2];
     }
@@ -2485,9 +2583,11 @@ async function createWebGPUBackend() {
       device.queue.submit([enc.finish()]);
     },
   };
-  const err = await device.popErrorScope();
-  if (err) {
-    console.warn('WebGPU のシェーダを作れません (WebGL を使います):', err.message);
+  const err = await device.popErrorScope();            // validation
+  const oom = await device.popErrorScope();            // out-of-memory
+  if (err || oom) {
+    console.warn(err ? 'WebGPU のシェーダを作れません (WebGL を使います):' : 'WebGPU のバッファを確保できません (WebGL を使います):',
+                 (err || oom).message);
     device.destroy();
     return null;
   }
@@ -2530,7 +2630,9 @@ function createCanvas2DRenderer() {
       for (let t = 0; t < numTypes; t++) {
         ctx.fillStyle = styles[t];
         for (let i = 0; i < n; i++) {
-          if (type[i] === t) ctx.fillRect(posX[i] - hs, posY[i] - hs, s, s);
+          if (type[i] !== t) continue;
+          if (params.pointSharp >= 0.5) { ctx.beginPath(); ctx.arc(posX[i], posY[i], hs * 2, 0, 6.2832); ctx.fill(); }
+          else ctx.fillRect(posX[i] - hs, posY[i] - hs, s, s);
         }
       }
     },
@@ -2607,6 +2709,7 @@ function refreshLabels() {
 
 ui.count.addEventListener('input', () => {
   setParticleCount(countFromSlider(+ui.count.value));
+  chosenCount = params.count;
   ui.countVal.textContent = params.count;   // つまみは触っている位置のまま
 });
 ui.rmax.addEventListener('input', () => { params.rMaxSetting = +ui.rmax.value; rebuildGrid(); refreshLabels(); });
@@ -2814,6 +2917,7 @@ const ADVANCED = [
   ['beta',          '近すぎて反発する距離 (全組)', 0.05, 0.9, 0.01, (v) => Math.round(v * 100) + '% (rMax 比)', BETA],
   ['pointSize',     '点の大きさ',             1,    20,    0.5,  (v) => v.toFixed(1) + ' px', POINT_SIZE],
   ['pointAlpha',    '点の明るさ',             0.05, 1,     0.01, (v) => v.toFixed(2), POINT_ALPHA],
+  ['pointSharp',    '粒の輪郭',               0,    1,     0.05, (v) => v <= 0 ? 'ふんわり' : v >= 1 ? 'くっきり' : v.toFixed(2), POINT_SHARP],
   ['trailFade',     '残像の消え方',           0.02, 1,     0.01, (v) => v >= 1 ? '残像なし' : v.toFixed(2) + (v < 0.1 ? ' (長い)' : ''), TRAIL_FADE],
   ['pointerRadius', '「破壊」の半径',         30,   500,   5,    (v) => v + ' px', POINTER_RADIUS],
   ['pointerForce',  '「破壊」の強さ',         0,    20000, 100,  (v) => String(v), POINTER_FORCE],
@@ -2839,10 +2943,13 @@ const advInputs = {};
   refreshAdvanced();
 })();
 function setAdvanced(key, v) {
+  const changed = params[key] !== v;
   params[key] = v;
-  if (key === 'beta') { pairMin.fill(v); updateRangesUniform(); simVersion++; refreshMatrixView(); }   // 全組の反発距離
-  if (key === 'pointSize' || key === 'pointAlpha') renderer.applyStyle();
-  if (key === 'pointSize' || key === 'pointAlpha' || key === 'trailFade') idleFrames = 0;   // 停止中も描き直す
+  // 全組の反発距離: 値が実際に変わったときだけ全組へ反映する
+  // (「初期値に戻す」などで同じ値を入れ直しただけのときは、組ごとに調整した値を消さない)
+  if (key === 'beta' && changed) { pairMin.fill(v); updateRangesUniform(); simVersion++; refreshMatrixView(); }   // 全組の反発距離
+  if (key === 'pointSize' || key === 'pointAlpha' || key === 'pointSharp') renderer.applyStyle();
+  if (key === 'pointSize' || key === 'pointAlpha' || key === 'pointSharp' || key === 'trailFade') idleFrames = 0;   // 停止中も描き直す
   if (key === 'pointerRadius') updateRing();
   refreshAdvanced();
 }
@@ -2893,10 +3000,11 @@ window.addEventListener('keydown', (e) => {
 });
 
 let noticeTimer = 0;
-function showNotice(text) {
+/** パネルに知らせを出す。ms 後に消す (0 = 消さない) */
+function showNotice(text, ms = 6000) {
   ui.notice.textContent = text;
   clearTimeout(noticeTimer);
-  noticeTimer = setTimeout(() => { ui.notice.textContent = ''; }, 6000);
+  if (ms > 0) noticeTimer = setTimeout(() => { ui.notice.textContent = ''; }, ms);
 }
 
 /* ---- ポインタ (マウス / タッチ) → input ---- */
@@ -2975,11 +3083,34 @@ document.addEventListener('visibilitychange', () => { skipFpsFrame = true; });
 
 // GPU がリセットされた (ドライバの再起動や過負荷) ときは、復帰したらページを読み込み直す
 let contextLost = false;
+// リセットの原因になった設定 (粒子数など) のまま起動し直すと、リセット → 読み込み直し が終わらなくなる。
+// リセットを記録しておき、直後の起動では粒子数と速度を初期値に戻す (boot 参照)。
+// それでも短時間に続くときは、自動の読み込み直しをやめる
+const GPU_LOST_KEY       = SETTINGS_KEY + ':gpuLost';
+const GPU_LOST_WINDOW_MS = 60000;   // この時間内のリセットを「続けて起きた」とみなす
+const GPU_LOST_MAX       = 3;       // 続けてこの回数リセットされたら自動で読み込み直さない
+function readGpuLost() {
+  try {
+    const v = JSON.parse(localStorage.getItem(GPU_LOST_KEY) || 'null');
+    if (v && typeof v.n === 'number' && typeof v.t === 'number' && Date.now() - v.t < GPU_LOST_WINDOW_MS) return v;
+  } catch (e) { /* 読めない環境 */ }
+  return null;
+}
+/** GPU のリセットを記録する。自動で読み込み直してよければ true */
+let gpuLostReload = true;
+function noteGpuLost() {
+  const prev = readGpuLost();
+  const n = prev ? prev.n + 1 : 1;
+  try { localStorage.setItem(GPU_LOST_KEY, JSON.stringify({ n, t: Date.now() })); } catch (e) { /* 保存できない環境 */ }
+  gpuLostReload = n < GPU_LOST_MAX;
+  if (!gpuLostReload) showNotice('GPU のリセットが続いています。自動の読み込み直しを止めました (手動で読み込み直してください)', 0);
+  return gpuLostReload;
+}
 canvas.addEventListener('webglcontextlost', (e) => {
   e.preventDefault(); contextLost = true;
-  showNotice('GPU がリセットされました。復帰したら読み込み直します');
+  if (noteGpuLost()) showNotice('GPU がリセットされました。復帰したら読み込み直します');
 });
-canvas.addEventListener('webglcontextrestored', () => location.reload());
+canvas.addEventListener('webglcontextrestored', () => { if (gpuLostReload) location.reload(); });
 
 function frame(now) {
   if (contextLost) { requestAnimationFrame(frame); return; }
@@ -3011,7 +3142,8 @@ function frame(now) {
         for (let s = 0; s < speedNow; s++) {
           if (s > 0 && ((gpu && gpu.busy) || par.inFlight(params.count))) break;
           const t0 = performance.now();
-          const usedWorkers = step(DT * params.timeScale);
+          // Worker への先回りは、このフレームの最後のステップだけ (途中で頼むと結果待ちで ×N が回らない)
+          const usedWorkers = step(DT * params.timeScale, s === speedNow - 1);
           const ms = performance.now() - t0;
           if (!usedWorkers) par.observe(ms);
           if (!(gpu && gpu.active)) cpuHeavy(usedWorkers ? Math.max(ms, par.lastLatencyMs) : ms);
@@ -3095,11 +3227,14 @@ function frame(now) {
 function collectSettings() {
   return {
     app: 'shibalab-particle-life', v: 1,
-    count: params.count, rMax: params.rMaxSetting, halfLife: params.halfLife, types: numTypes, speed: params.speed,
+    count: chosenCount, rMax: params.rMaxSetting, halfLife: params.halfLife, types: numTypes, speed: params.speed,
     matrix: Array.from(matrix), pairMax: Array.from(pairMax), pairMin: Array.from(pairMin),
     adv: Object.fromEntries(ADVANCED.map(([k]) => [k, params[k]])),
   };
 }
+// 保存する粒子数は「人が選んだ値」(スライダー・設定の読み込み・初期化)。
+// 負荷軽減で自動的に減らした値は保存しない (一時的な重さで減ったまま次回も起動しないように)
+let chosenCount = DEFAULT_COUNT;
 let lastSaved = '';
 function saveSettings() {
   const s = JSON.stringify(collectSettings());
@@ -3125,7 +3260,7 @@ function applySettings(s) {
   if (s.rMax !== undefined) { params.rMaxSetting = num(s.rMax, MIN_RMAX, MAX_RMAX, params.rMaxSetting); rebuildGrid(); }
   if (s.halfLife !== undefined) params.halfLife = num(s.halfLife, MIN_HALF_LIFE, MAX_HALF_LIFE, params.halfLife);
   if (s.speed !== undefined) setSpeed(num(s.speed, 1, MAX_SPEED, 1));
-  if (s.count !== undefined) setParticleCount(num(s.count, MIN_COUNT, maxCount(), params.count));
+  if (s.count !== undefined) { setParticleCount(num(s.count, MIN_COUNT, maxCount(), params.count)); chosenCount = params.count; }
   simVersion++; idleFrames = 0;
   refreshLabels(); refreshMatrixView(); refreshAdvanced(); updateEngine(); refreshEngineLabel();
   return true;
@@ -3155,8 +3290,8 @@ $('btnResetAll').addEventListener('click', () => {
   params.rMaxSetting = DEFAULT_RMAX; rebuildGrid();
   params.halfLife = DEFAULT_HALF_LIFE;
   setSpeed(1);
-  setParticleCount(DEFAULT_COUNT);
-  startCreation();
+  setParticleCount(DEFAULT_COUNT); chosenCount = params.count;
+  const init = new Float32Array(numTypes * numTypes); initialMatrixInto(init); lerpMatrixTo(init);
   refreshLabels(); refreshMatrixView(); refreshAdvanced(); updateEngine(); refreshEngineLabel();
   showNotice('すべて初期値に戻しました');
 });
@@ -3171,13 +3306,24 @@ async function boot() {
   worldH = Math.max(1, window.innerHeight);
   // 使う分だけ生成 (増やしたときは setParticleCount が増えた分を生成する)
   for (let i = 0; i < params.count; i++) randomizeParticle(i);
-  randomMatrixInto(matrix);
+  initialMatrixInto(matrix);
   setParticleCount(DEFAULT_COUNT);
   renderer.onCountChanged(params.count, 0);   // 最初の粒子のタイプを描画側へ (以後は増えた分だけ送る)
   resize();
   // 前回の設定を戻す (?reset を付けると戻さない)
   if (!/[?&]reset/.test(location.search)) {
-    try { const saved = localStorage.getItem(SETTINGS_KEY); if (saved) applySettings(JSON.parse(saved)); }
+    try {
+      const saved = localStorage.getItem(SETTINGS_KEY);
+      if (saved) {
+        const s = JSON.parse(saved);
+        // 直前に GPU がリセットされていたら、重さに効く粒子数と速度は戻さない (同じ設定でまたリセットされないように)
+        if (s && typeof s === 'object' && readGpuLost()) {
+          delete s.count; delete s.speed;
+          setTimeout(() => showNotice('GPU がリセットされたため、粒子数と速度を初期値に戻しました', 12000), 0);
+        }
+        applySettings(s);
+      }
+    }
     catch (e) { console.warn('保存された設定を読めません:', e); }
   }
   refreshLabels();
